@@ -6,7 +6,7 @@ import pandas as pd
 import pytest
 
 from tradingagents.agents.managers.portfolio_manager import create_portfolio_manager
-from tradingagents.agents.schemas import PortfolioDecision, PortfolioRating
+from tradingagents.agents.schemas import PortfolioDecision
 from tradingagents.graph.propagation import Propagator
 from tradingagents.graph.trading_graph import TradingAgentsGraph
 from tradingagents.memory import TradingMemoryLog, settlement
@@ -14,9 +14,9 @@ from tradingagents.memory.reflection import Reflector
 
 _SEP = TradingMemoryLog._SEPARATOR
 
-DECISION_BUY = "Rating: Buy\nEnter at $189-192, 6% portfolio cap."
-DECISION_OVERWEIGHT = (
-    "Rating: Overweight\n"
+DECISION_BUY = "Rating: Buy\nMua vùng 70.500-71.200 VND, tỷ trọng 6% NAV."
+DECISION_WATCH = (
+    "Rating: Watch\n"
     "Executive Summary: Moderate position, await confirmation.\n"
     "Investment Thesis: Strong fundamentals but near-term headwinds."
 )
@@ -54,20 +54,27 @@ def _resolve_entry(log, ticker, date, decision, reflection="Good call."):
     log.update_with_outcome(ticker, date, 0.05, 0.02, 5, reflection)
 
 
-def _price_df(prices, start="2026-01-05"):
-    """Minimal DataFrame matching yfinance .history() output shape.
+def _closes_from(prices_by_symbol, asked=None, start="2026-01-05"):
+    """A ``settlement.get_closes`` stand-in serving daily closes from ``start``.
 
-    Uses a DatetimeIndex like real yfinance output, so resolution-date
-    extraction (stock.index[holding_days]) works (#1251).
+    Uses a DatetimeIndex like the real OHLCV loader, so resolution-date
+    extraction (stock.index[holding_days]) works (#1251). A symbol with no
+    prices gets an empty Series, as the loader returns for a code it cannot price.
     """
-    idx = pd.date_range(start=start, periods=len(prices), freq="D")
-    return pd.DataFrame({"Close": prices}, index=idx)
+    def get_closes(symbol, start_date, end_date):
+        if asked is not None:
+            asked.append((symbol, start_date, end_date))
+        prices = prices_by_symbol.get(symbol, [])
+        idx = pd.date_range(start=start, periods=len(prices), freq="D")
+        series = pd.Series(prices, index=idx, dtype=float)
+        return series[(series.index >= start_date) & (series.index < end_date)]
+    return get_closes
 
 
 def _make_pm_state(past_context=""):
     """Minimal AgentState dict for portfolio_manager_node."""
     return {
-        "company_of_interest": "NVDA",
+        "company_of_interest": "FPT",
         "past_context": past_context,
         "risk_debate_state": {
             "history": "Risk debate history.",
@@ -94,9 +101,9 @@ def _structured_pm_llm(captured: dict, decision: PortfolioDecision | None = None
     """
     if decision is None:
         decision = PortfolioDecision(
-            rating=PortfolioRating.HOLD,
             executive_summary="Hold the position; await catalyst.",
             investment_thesis="Balanced view; neither side carried the debate.",
+            key_risks="Thủng mốc hỗ trợ đã cho.",
         )
     structured = MagicMock()
     structured.invoke.side_effect = lambda prompt: (
@@ -116,23 +123,23 @@ class TestTradingMemoryLogCore:
     def test_store_creates_file(self, tmp_path):
         log = make_log(tmp_path)
         assert not (tmp_path / "trading_memory.md").exists()
-        log.store_decision("NVDA", "2026-01-10", DECISION_BUY)
+        log.store_decision("FPT", "2026-01-10", DECISION_BUY)
         assert (tmp_path / "trading_memory.md").exists()
 
     def test_store_appends_not_overwrites(self, tmp_path):
         log = make_log(tmp_path)
-        log.store_decision("NVDA", "2026-01-10", DECISION_BUY)
-        log.store_decision("AAPL", "2026-01-11", DECISION_OVERWEIGHT)
+        log.store_decision("FPT", "2026-01-10", DECISION_BUY)
+        log.store_decision("HPG", "2026-01-11", DECISION_WATCH)
         entries = log.load_entries()
         assert len(entries) == 2
-        assert entries[0]["ticker"] == "NVDA"
-        assert entries[1]["ticker"] == "AAPL"
+        assert entries[0]["ticker"] == "FPT"
+        assert entries[1]["ticker"] == "HPG"
 
     def test_store_decision_idempotent(self, tmp_path):
         """Calling store_decision twice with same (ticker, date) stores only one entry."""
         log = make_log(tmp_path)
-        log.store_decision("NVDA", "2026-01-10", DECISION_BUY)
-        log.store_decision("NVDA", "2026-01-10", DECISION_BUY)
+        log.store_decision("FPT", "2026-01-10", DECISION_BUY)
+        log.store_decision("FPT", "2026-01-10", DECISION_BUY)
         assert len(log.load_entries()) == 1
 
     def test_store_decision_idempotent_after_the_entry_resolves(self, tmp_path):
@@ -143,10 +150,10 @@ class TestTradingMemoryLogCore:
         decision counted twice in past context and in any aggregate over the log.
         """
         log = make_log(tmp_path)
-        log.store_decision("NVDA", "2026-01-10", DECISION_BUY)
-        log.update_with_outcome("NVDA", "2026-01-10", 0.05, 0.02, 5, "worked", "2026-01-17")
+        log.store_decision("FPT", "2026-01-10", DECISION_BUY)
+        log.update_with_outcome("FPT", "2026-01-10", 0.05, 0.02, 5, "worked", "2026-01-17")
 
-        log.store_decision("NVDA", "2026-01-10", DECISION_BUY)
+        log.store_decision("FPT", "2026-01-10", DECISION_BUY)
 
         entries = log.load_entries()
         assert len(entries) == 1
@@ -155,14 +162,14 @@ class TestTradingMemoryLogCore:
     def test_batch_update_resolves_multiple_entries(self, tmp_path):
         """batch_update_with_outcomes resolves multiple pending entries in one write."""
         log = make_log(tmp_path)
-        log.store_decision("NVDA", "2026-01-05", DECISION_BUY)
-        log.store_decision("NVDA", "2026-01-12", DECISION_SELL)
+        log.store_decision("FPT", "2026-01-05", DECISION_BUY)
+        log.store_decision("FPT", "2026-01-12", DECISION_SELL)
 
         updates = [
-            {"ticker": "NVDA", "trade_date": "2026-01-05",
+            {"ticker": "FPT", "trade_date": "2026-01-05",
              "raw_return": 0.05, "alpha_return": 0.02, "holding_days": 5,
              "reflection": "First correct."},
-            {"ticker": "NVDA", "trade_date": "2026-01-12",
+            {"ticker": "FPT", "trade_date": "2026-01-12",
              "raw_return": -0.03, "alpha_return": -0.01, "holding_days": 5,
              "reflection": "Second correct."},
         ]
@@ -176,21 +183,31 @@ class TestTradingMemoryLogCore:
 
     def test_pending_tag_format(self, tmp_path):
         log = make_log(tmp_path)
-        log.store_decision("NVDA", "2026-01-10", DECISION_BUY)
+        log.store_decision("FPT", "2026-01-10", DECISION_BUY)
         text = (tmp_path / "trading_memory.md").read_text(encoding="utf-8")
-        assert "[2026-01-10 | NVDA | Buy | pending]" in text
+        assert "[2026-01-10 | FPT | BUY | pending]" in text
 
     # Rating parsing
 
     def test_rating_parsed_buy(self, tmp_path):
         log = make_log(tmp_path)
-        log.store_decision("NVDA", "2026-01-10", DECISION_BUY)
-        assert log.load_entries()[0]["rating"] == "Buy"
+        log.store_decision("FPT", "2026-01-10", DECISION_BUY)
+        assert log.load_entries()[0]["rating"] == "BUY"
 
-    def test_rating_parsed_overweight(self, tmp_path):
+    def test_rating_parsed_watch(self, tmp_path):
         log = make_log(tmp_path)
-        log.store_decision("AAPL", "2026-01-11", DECISION_OVERWEIGHT)
-        assert log.load_entries()[0]["rating"] == "Overweight"
+        log.store_decision("HPG", "2026-01-11", DECISION_WATCH)
+        assert log.load_entries()[0]["rating"] == "WATCH"
+
+    def test_rating_stored_as_the_canonical_action(self, tmp_path):
+        """Vietnamese and lower-case names are stored as the engine's action."""
+        log = make_log(tmp_path)
+        log.store_decision("FPT", "2026-01-10", "**Rating**: Bán\n\nThoát vị thế.")
+        log.store_decision("HPG", "2026-01-10", "**Rating**: no_trade\n\nĐứng ngoài.")
+        assert [e["rating"] for e in log.load_entries()] == ["SELL", "NO_TRADE"]
+        text = (tmp_path / "trading_memory.md").read_text(encoding="utf-8")
+        assert "[2026-01-10 | FPT | SELL | pending]" in text
+        assert "[2026-01-10 | HPG | NO_TRADE | pending]" in text
 
     def test_an_unreadable_decision_is_tagged_for_review(self, tmp_path):
         """Not a Hold: a fabricated rating is quoted back to the next run as a
@@ -198,7 +215,7 @@ class TestTradingMemoryLogCore:
         from tradingagents.agents.rating import RATING_REVIEW
 
         log = make_log(tmp_path)
-        log.store_decision("MSFT", "2026-01-12", DECISION_NO_RATING)
+        log.store_decision("VCB", "2026-01-12", DECISION_NO_RATING)
         assert log.load_entries()[0]["rating"] == RATING_REVIEW
 
     def test_rating_priority_over_prose(self, tmp_path):
@@ -209,8 +226,8 @@ class TestTradingMemoryLogCore:
             "Executive Summary: Strong fundamentals support the position."
         )
         log = make_log(tmp_path)
-        log.store_decision("NVDA", "2026-01-10", decision)
-        assert log.load_entries()[0]["rating"] == "Buy"
+        log.store_decision("FPT", "2026-01-10", decision)
+        assert log.load_entries()[0]["rating"] == "BUY"
 
     # Delimiter robustness
 
@@ -218,7 +235,7 @@ class TestTradingMemoryLogCore:
         """LLM decision containing '---' must not corrupt the entry."""
         decision = "Rating: Buy\n\n---\n\nRisk: elevated volatility."
         log = make_log(tmp_path)
-        log.store_decision("NVDA", "2026-01-10", decision)
+        log.store_decision("FPT", "2026-01-10", decision)
         entries = log.load_entries()
         assert len(entries) == 1
         assert "Risk: elevated volatility" in entries[0]["decision"]
@@ -231,91 +248,91 @@ class TestTradingMemoryLogCore:
 
     def test_load_entries_single(self, tmp_path):
         log = make_log(tmp_path)
-        log.store_decision("NVDA", "2026-01-10", DECISION_BUY)
+        log.store_decision("FPT", "2026-01-10", DECISION_BUY)
         entries = log.load_entries()
         assert len(entries) == 1
         e = entries[0]
         assert e["date"] == "2026-01-10"
-        assert e["ticker"] == "NVDA"
-        assert e["rating"] == "Buy"
+        assert e["ticker"] == "FPT"
+        assert e["rating"] == "BUY"
         assert e["pending"] is True
         assert e["raw"] is None
 
     def test_load_entries_multiple(self, tmp_path):
         log = make_log(tmp_path)
-        log.store_decision("NVDA", "2026-01-10", DECISION_BUY)
-        log.store_decision("AAPL", "2026-01-11", DECISION_OVERWEIGHT)
-        log.store_decision("MSFT", "2026-01-12", DECISION_NO_RATING)
+        log.store_decision("FPT", "2026-01-10", DECISION_BUY)
+        log.store_decision("HPG", "2026-01-11", DECISION_WATCH)
+        log.store_decision("VCB", "2026-01-12", DECISION_NO_RATING)
         entries = log.load_entries()
         assert len(entries) == 3
-        assert [e["ticker"] for e in entries] == ["NVDA", "AAPL", "MSFT"]
+        assert [e["ticker"] for e in entries] == ["FPT", "HPG", "VCB"]
 
     def test_decision_content_preserved(self, tmp_path):
         log = make_log(tmp_path)
-        log.store_decision("NVDA", "2026-01-10", DECISION_BUY)
+        log.store_decision("FPT", "2026-01-10", DECISION_BUY)
         assert log.load_entries()[0]["decision"] == DECISION_BUY.strip()
 
     # get_pending_entries
 
     def test_get_pending_returns_pending_only(self, tmp_path):
         log = make_log(tmp_path)
-        _seed_completed(tmp_path, "NVDA", "2026-01-05", "Buy NVDA.", "Correct.")
-        log.store_decision("NVDA", "2026-01-10", DECISION_BUY)
+        _seed_completed(tmp_path, "FPT", "2026-01-05", "Buy FPT.", "Correct.")
+        log.store_decision("FPT", "2026-01-10", DECISION_BUY)
         pending = log.get_pending_entries()
         assert len(pending) == 1
-        assert pending[0]["ticker"] == "NVDA"
+        assert pending[0]["ticker"] == "FPT"
         assert pending[0]["date"] == "2026-01-10"
 
     # get_past_context
 
     def test_get_past_context_empty(self, tmp_path):
         log = make_log(tmp_path)
-        assert log.get_past_context("NVDA") == ""
+        assert log.get_past_context("FPT") == ""
 
     def test_get_past_context_pending_excluded(self, tmp_path):
         log = make_log(tmp_path)
-        log.store_decision("NVDA", "2026-01-10", DECISION_BUY)
-        assert log.get_past_context("NVDA") == ""
+        log.store_decision("FPT", "2026-01-10", DECISION_BUY)
+        assert log.get_past_context("FPT") == ""
 
     def test_get_past_context_same_ticker(self, tmp_path):
         log = make_log(tmp_path)
-        _seed_completed(tmp_path, "NVDA", "2026-01-05", "Buy NVDA — AI capex thesis intact.", "Directionally correct.")
-        ctx = log.get_past_context("NVDA")
-        assert "Past analyses of NVDA" in ctx
-        assert "Buy NVDA" in ctx
+        _seed_completed(tmp_path, "FPT", "2026-01-05", "Buy FPT — AI capex thesis intact.", "Directionally correct.")
+        ctx = log.get_past_context("FPT")
+        assert "Past analyses of FPT" in ctx
+        assert "Buy FPT" in ctx
 
     def test_get_past_context_cross_ticker(self, tmp_path):
         log = make_log(tmp_path)
-        _seed_completed(tmp_path, "AAPL", "2026-01-05", "Buy AAPL — Services growth.", "Correct.")
-        ctx = log.get_past_context("NVDA")
+        _seed_completed(tmp_path, "HPG", "2026-01-05", "Buy HPG — Services growth.", "Correct.")
+        ctx = log.get_past_context("FPT")
         assert "Recent cross-ticker lessons" in ctx
-        assert "Past analyses of NVDA" not in ctx
+        assert "Past analyses of FPT" not in ctx
 
     def test_n_same_limit_respected(self, tmp_path):
         """Only the n_same most recent same-ticker entries are included."""
         log = make_log(tmp_path)
         for i in range(6):
-            _seed_completed(tmp_path, "NVDA", f"2026-01-{i+1:02d}", f"Buy entry {i}.", "Correct.")
-        ctx = log.get_past_context("NVDA", n_same=5)
+            _seed_completed(tmp_path, "FPT", f"2026-01-{i+1:02d}", f"Buy entry {i}.", "Correct.")
+        ctx = log.get_past_context("FPT", n_same=5)
         assert "Buy entry 0" not in ctx
         assert "Buy entry 5" in ctx
 
     def test_n_cross_limit_respected(self, tmp_path):
         """Only the n_cross most recent cross-ticker entries are included."""
         log = make_log(tmp_path)
-        for i, ticker in enumerate(["AAPL", "MSFT", "GOOG", "META"]):
+        for i, ticker in enumerate(["HPG", "VCB", "MWG", "VNM"]):
             _seed_completed(tmp_path, ticker, f"2026-01-{i+1:02d}", f"Buy {ticker}.", "Correct.")
-        ctx = log.get_past_context("NVDA", n_cross=3)
-        assert "AAPL" not in ctx
-        assert "META" in ctx
+        ctx = log.get_past_context("FPT", n_cross=3)
+        assert "HPG" not in ctx
+        assert "VNM" in ctx
 
     # No-op when config is None
 
     def test_no_log_path_is_noop(self):
         log = TradingMemoryLog(config=None)
-        log.store_decision("NVDA", "2026-01-10", DECISION_BUY)
+        log.store_decision("FPT", "2026-01-10", DECISION_BUY)
         assert log.load_entries() == []
-        assert log.get_past_context("NVDA") == ""
+        assert log.get_past_context("FPT") == ""
 
     # Rotation: opt-in cap on resolved entries
 
@@ -323,7 +340,7 @@ class TestTradingMemoryLogCore:
         """Without max_entries, all resolved entries are kept."""
         log = make_log(tmp_path)
         for i in range(7):
-            _resolve_entry(log, "NVDA", f"2026-01-{i+1:02d}", DECISION_BUY, f"Lesson {i}.")
+            _resolve_entry(log, "FPT", f"2026-01-{i+1:02d}", DECISION_BUY, f"Lesson {i}.")
         assert len(log.load_entries()) == 7
 
     def test_rotation_prunes_oldest_resolved(self, tmp_path):
@@ -334,7 +351,7 @@ class TestTradingMemoryLogCore:
         })
         # Resolve 5 entries; rotation should keep only the 3 most recent.
         for i in range(5):
-            _resolve_entry(log, "NVDA", f"2026-01-{i+1:02d}", DECISION_BUY, f"Lesson {i}.")
+            _resolve_entry(log, "FPT", f"2026-01-{i+1:02d}", DECISION_BUY, f"Lesson {i}.")
         entries = log.load_entries()
         assert len(entries) == 3
         # Confirm the OLDEST were dropped, not the newest.
@@ -349,11 +366,11 @@ class TestTradingMemoryLogCore:
         })
         # 3 resolved + 2 pending. With cap=2, only 2 resolved survive; both pending stay.
         for i in range(3):
-            _resolve_entry(log, "NVDA", f"2026-01-{i+1:02d}", DECISION_BUY, f"Resolved {i}.")
-        log.store_decision("NVDA", "2026-02-01", DECISION_BUY)
-        log.store_decision("NVDA", "2026-02-02", DECISION_OVERWEIGHT)
+            _resolve_entry(log, "FPT", f"2026-01-{i+1:02d}", DECISION_BUY, f"Resolved {i}.")
+        log.store_decision("FPT", "2026-02-01", DECISION_BUY)
+        log.store_decision("FPT", "2026-02-02", DECISION_WATCH)
         # Trigger rotation by resolving one more entry — pending entries must stay.
-        _resolve_entry(log, "NVDA", "2026-01-04", DECISION_BUY, "Resolved 3.")
+        _resolve_entry(log, "FPT", "2026-01-04", DECISION_BUY, "Resolved 3.")
         entries = log.load_entries()
         pending = [e for e in entries if e["pending"]]
         resolved = [e for e in entries if not e["pending"]]
@@ -367,24 +384,24 @@ class TestTradingMemoryLogCore:
             "memory_log_max_entries": 10,
         })
         for i in range(3):
-            _resolve_entry(log, "NVDA", f"2026-01-{i+1:02d}", DECISION_BUY, f"Lesson {i}.")
+            _resolve_entry(log, "FPT", f"2026-01-{i+1:02d}", DECISION_BUY, f"Lesson {i}.")
         assert len(log.load_entries()) == 3
 
     # Rating parsing: markdown bold and numbered list formats
 
     def test_rating_parsed_from_bold_markdown(self, tmp_path):
         """**Rating**: Buy — markdown bold around the label must not prevent parsing."""
-        decision = "**Rating**: Buy\nEnter at $190."
+        decision = "**Rating**: Buy\nMua quanh 70.500 VND."
         log = make_log(tmp_path)
-        log.store_decision("NVDA", "2026-01-10", decision)
-        assert log.load_entries()[0]["rating"] == "Buy"
+        log.store_decision("FPT", "2026-01-10", decision)
+        assert log.load_entries()[0]["rating"] == "BUY"
 
     def test_rating_parsed_from_bold_value(self, tmp_path):
         """Rating: **Sell** — markdown bold around the value must not prevent parsing."""
         decision = "Rating: **Sell**\nExit immediately."
         log = make_log(tmp_path)
-        log.store_decision("NVDA", "2026-01-10", decision)
-        assert log.load_entries()[0]["rating"] == "Sell"
+        log.store_decision("FPT", "2026-01-10", decision)
+        assert log.load_entries()[0]["rating"] == "SELL"
 
     def test_rating_label_wins_over_prose_with_markdown(self, tmp_path):
         """Rating: **Sell** must win even when prose contains a conflicting rating word."""
@@ -394,15 +411,15 @@ class TestTradingMemoryLogCore:
             "Exit before earnings."
         )
         log = make_log(tmp_path)
-        log.store_decision("NVDA", "2026-01-10", decision)
-        assert log.load_entries()[0]["rating"] == "Sell"
+        log.store_decision("FPT", "2026-01-10", decision)
+        assert log.load_entries()[0]["rating"] == "SELL"
 
     def test_rating_parsed_from_numbered_list(self, tmp_path):
         """1. Rating: Buy — numbered list prefix must not prevent parsing."""
-        decision = "1. Rating: Buy\nEnter at $190."
+        decision = "1. Rating: Buy\nMua quanh 70.500 VND."
         log = make_log(tmp_path)
-        log.store_decision("NVDA", "2026-01-10", decision)
-        assert log.load_entries()[0]["rating"] == "Buy"
+        log.store_decision("FPT", "2026-01-10", decision)
+        assert log.load_entries()[0]["rating"] == "BUY"
 
 
 # ---------------------------------------------------------------------------
@@ -415,18 +432,18 @@ class TestDeferredReflection:
 
     def test_update_replaces_pending_tag(self, tmp_path):
         log = make_log(tmp_path)
-        log.store_decision("NVDA", "2026-01-10", DECISION_BUY)
-        log.update_with_outcome("NVDA", "2026-01-10", 0.042, 0.021, 5, "Momentum confirmed.")
+        log.store_decision("FPT", "2026-01-10", DECISION_BUY)
+        log.update_with_outcome("FPT", "2026-01-10", 0.042, 0.021, 5, "Momentum confirmed.")
         text = (tmp_path / "trading_memory.md").read_text(encoding="utf-8")
-        assert "[2026-01-10 | NVDA | Buy | pending]" not in text
+        assert "[2026-01-10 | FPT | BUY | pending]" not in text
         assert "+4.2%" in text
         assert "+2.1%" in text
         assert "5d" in text
 
     def test_update_appends_reflection(self, tmp_path):
         log = make_log(tmp_path)
-        log.store_decision("NVDA", "2026-01-10", DECISION_BUY)
-        log.update_with_outcome("NVDA", "2026-01-10", 0.042, 0.021, 5, "Momentum confirmed.")
+        log.store_decision("FPT", "2026-01-10", DECISION_BUY)
+        log.update_with_outcome("FPT", "2026-01-10", 0.042, 0.021, 5, "Momentum confirmed.")
         entries = log.load_entries()
         assert len(entries) == 1
         e = entries[0]
@@ -437,25 +454,25 @@ class TestDeferredReflection:
     def test_update_preserves_other_entries(self, tmp_path):
         """Only the matching entry is modified; all other entries remain unchanged."""
         log = make_log(tmp_path)
-        log.store_decision("NVDA", "2026-01-10", DECISION_BUY)
-        log.store_decision("AAPL", "2026-01-11", "Rating: Hold\nHold AAPL.")
-        log.store_decision("MSFT", "2026-01-12", DECISION_SELL)
-        log.update_with_outcome("AAPL", "2026-01-11", 0.01, -0.01, 5, "Neutral result.")
+        log.store_decision("FPT", "2026-01-10", DECISION_BUY)
+        log.store_decision("HPG", "2026-01-11", "Rating: Hold\nHold HPG.")
+        log.store_decision("VCB", "2026-01-12", DECISION_SELL)
+        log.update_with_outcome("HPG", "2026-01-11", 0.01, -0.01, 5, "Neutral result.")
         entries = log.load_entries()
         assert len(entries) == 3
         nvda, aapl, msft = entries
-        assert nvda["ticker"] == "NVDA" and nvda["pending"] is True
-        assert aapl["ticker"] == "AAPL" and aapl["pending"] is False
+        assert nvda["ticker"] == "FPT" and nvda["pending"] is True
+        assert aapl["ticker"] == "HPG" and aapl["pending"] is False
         assert aapl["reflection"] == "Neutral result."
-        assert msft["ticker"] == "MSFT" and msft["pending"] is True
+        assert msft["ticker"] == "VCB" and msft["pending"] is True
 
     def test_update_atomic_write(self, tmp_path):
         """A pre-existing .tmp file is overwritten; the log is correctly updated."""
         log = make_log(tmp_path)
-        log.store_decision("NVDA", "2026-01-10", DECISION_BUY)
+        log.store_decision("FPT", "2026-01-10", DECISION_BUY)
         stale_tmp = tmp_path / "trading_memory.tmp"
         stale_tmp.write_text("GARBAGE CONTENT — should be overwritten", encoding="utf-8")
-        log.update_with_outcome("NVDA", "2026-01-10", 0.042, 0.021, 5, "Correct.")
+        log.update_with_outcome("FPT", "2026-01-10", 0.042, 0.021, 5, "Correct.")
         assert not stale_tmp.exists()
         entries = log.load_entries()
         assert len(entries) == 1
@@ -464,13 +481,13 @@ class TestDeferredReflection:
 
     def test_update_noop_when_no_log_path(self):
         log = TradingMemoryLog(config=None)
-        log.update_with_outcome("NVDA", "2026-01-10", 0.05, 0.02, 5, "Reflection")
+        log.update_with_outcome("FPT", "2026-01-10", 0.05, 0.02, 5, "Reflection")
 
     def test_formatting_roundtrip_after_update(self, tmp_path):
         """All fields intact and blank line between tag and DECISION preserved after update."""
         log = make_log(tmp_path)
-        log.store_decision("NVDA", "2026-01-10", DECISION_BUY)
-        log.update_with_outcome("NVDA", "2026-01-10", 0.042, 0.021, 5, "Momentum confirmed.")
+        log.store_decision("FPT", "2026-01-10", DECISION_BUY)
+        log.update_with_outcome("FPT", "2026-01-10", 0.042, 0.021, 5, "Momentum confirmed.")
         entries = log.load_entries()
         assert len(entries) == 1
         e = entries[0]
@@ -481,7 +498,7 @@ class TestDeferredReflection:
         assert e["alpha"] == "+2.1%"
         assert e["holding"] == "5d"
         raw_text = (tmp_path / "trading_memory.md").read_text(encoding="utf-8")
-        assert "[2026-01-10 | NVDA | Buy | +4.2% | +2.1% | 5d]\n\nDECISION:" in raw_text
+        assert "[2026-01-10 | FPT | BUY | +4.2% | +2.1% | 5d]\n\nDECISION:" in raw_text
 
     # Reflector.reflect_on_final_decision
 
@@ -511,69 +528,56 @@ class TestDeferredReflection:
 
     # settlement.fetch_returns
 
-    def test_fetch_returns_valid_ticker(self):
+    def test_fetch_returns_valid_ticker(self, monkeypatch):
         stock_prices = [100.0, 102.0, 104.0, 103.0, 105.0, 106.0]
-        spy_prices   = [400.0, 402.0, 404.0, 403.0, 405.0, 406.0]
-        with patch("yfinance.Ticker") as mock_ticker_cls:
-            def _make_ticker(sym):
-                m = MagicMock()
-                m.history.return_value = _price_df(spy_prices if sym == "SPY" else stock_prices)
-                return m
-            mock_ticker_cls.side_effect = _make_ticker
-            raw, alpha, days, resolved = settlement.fetch_returns("NVDA", "2026-01-05")
+        index_prices = [1200.0, 1202.0, 1204.0, 1203.0, 1205.0, 1206.0]
+        asked = []
+        monkeypatch.setattr(settlement, "get_closes", _closes_from(
+            {"FPT": stock_prices, "VNINDEX": index_prices}, asked))
+        raw, alpha, days, resolved = settlement.fetch_returns("FPT", "2026-01-05")
         assert raw is not None and alpha is not None and days is not None
         assert isinstance(raw, float) and isinstance(alpha, float) and isinstance(days, int)
         assert days == 5
+        assert raw == pytest.approx(0.06)
+        assert alpha == pytest.approx(0.06 - 6 / 1200)
         # resolution date = the bar `days` sessions after the trade date (#1251)
         assert resolved == "2026-01-10"
+        # VNINDEX is the default benchmark.
+        assert [sym for sym, *_ in asked] == ["FPT", "VNINDEX"]
 
-    def test_fetch_returns_too_recent(self):
+    def test_fetch_returns_too_recent(self, monkeypatch):
         """Only 1 data point available → returns all-None, no crash."""
-        with patch("yfinance.Ticker") as mock_ticker_cls:
-            m = MagicMock()
-            m.history.return_value = _price_df([100.0])
-            mock_ticker_cls.return_value = m
-            raw, alpha, days, resolved = settlement.fetch_returns("NVDA", "2026-04-19")
+        monkeypatch.setattr(settlement, "get_closes", _closes_from(
+            {"FPT": [100.0], "VNINDEX": [1200.0]}, start="2026-04-19"))
+        raw, alpha, days, resolved = settlement.fetch_returns("FPT", "2026-04-19")
         assert (raw, alpha, days, resolved) == (None, None, None, None)
 
-    def test_fetch_returns_delisted(self):
-        """Empty DataFrame → returns all-None, no crash."""
-        with patch("yfinance.Ticker") as mock_ticker_cls:
-            m = MagicMock()
-            m.history.return_value = pd.DataFrame({"Close": []})
-            mock_ticker_cls.return_value = m
-            raw, alpha, days, resolved = settlement.fetch_returns("XXXXXFAKE", "2026-01-10")
+    def test_fetch_returns_delisted(self, monkeypatch):
+        """Empty series (no data for the code) → returns all-None, no crash."""
+        monkeypatch.setattr(settlement, "get_closes", _closes_from(
+            {"VNINDEX": [1200.0] * 8}, start="2026-01-10"))
+        raw, alpha, days, resolved = settlement.fetch_returns("XXXXXFAKE", "2026-01-10")
         assert (raw, alpha, days, resolved) == (None, None, None, None)
 
-    def test_fetch_returns_spy_shorter_than_stock(self):
-        """SPY having fewer rows than the stock (but still a full window) must
-        not raise IndexError."""
+    def test_fetch_returns_index_shorter_than_stock(self, monkeypatch):
+        """VNINDEX having fewer rows than the stock (but still a full window)
+        must not raise IndexError."""
         stock_prices = [100.0, 102.0, 104.0, 103.0, 105.0, 106.0, 107.0, 108.0]  # 8 rows
-        spy_prices   = [400.0, 402.0, 403.0, 405.0, 406.0, 407.0]                # 6 rows
-        with patch("yfinance.Ticker") as mock_ticker_cls:
-            def _make_ticker(sym):
-                m = MagicMock()
-                m.history.return_value = _price_df(spy_prices if sym == "SPY" else stock_prices)
-                return m
-            mock_ticker_cls.side_effect = _make_ticker
-            raw, alpha, days, resolved = settlement.fetch_returns("NVDA", "2026-01-05")
+        index_prices = [1200.0, 1202.0, 1203.0, 1205.0, 1206.0, 1207.0]           # 6 rows
+        monkeypatch.setattr(settlement, "get_closes", _closes_from(
+            {"FPT": stock_prices, "VNINDEX": index_prices}))
+        raw, alpha, days, resolved = settlement.fetch_returns("FPT", "2026-01-05")
         assert raw is not None and alpha is not None
         assert days == 5  # full holding window used for both series
         assert resolved == "2026-01-10"
 
-    def test_fetch_returns_incomplete_window_stays_pending(self):
+    def test_fetch_returns_incomplete_window_stays_pending(self, monkeypatch):
         """#1169: a rerun before the full holding window has traded returns
         unavailable (all-None) so the entry stays pending, rather than settling
         on a premature partial return."""
-        stock_prices = [100.0, 102.0, 104.0]  # only 3 rows; holding window is 5
-        spy_prices   = [400.0, 402.0, 404.0]
-        with patch("yfinance.Ticker") as mock_ticker_cls:
-            def _make_ticker(sym):
-                m = MagicMock()
-                m.history.return_value = _price_df(spy_prices if sym == "SPY" else stock_prices)
-                return m
-            mock_ticker_cls.side_effect = _make_ticker
-            result = settlement.fetch_returns("NVDA", "2026-01-05")
+        monkeypatch.setattr(settlement, "get_closes", _closes_from(
+            {"FPT": [100.0, 102.0, 104.0], "VNINDEX": [1200.0, 1202.0, 1204.0]}))
+        result = settlement.fetch_returns("FPT", "2026-01-05")
         assert result == (None, None, None, None)
 
     # settlement.resolve_benchmark picks the index for the alpha calculation
@@ -581,89 +585,49 @@ class TestDeferredReflection:
     def test_resolve_benchmark_explicit_override(self):
         """config['benchmark_ticker'] wins for every ticker."""
         config = {
-            "benchmark_ticker": "QQQ",
-            "benchmark_map": {"": "SPY", ".T": "^N225"},
+            "benchmark_ticker": "VN30",
+            "benchmark_map": {"": "VNINDEX", ".HN": "HNX"},
         }
-        assert settlement.resolve_benchmark("7203.T", config) == "QQQ"
-        assert settlement.resolve_benchmark("NVDA", config) == "QQQ"
+        assert settlement.resolve_benchmark("FPT", config) == "VN30"
+        assert settlement.resolve_benchmark("SHS", config) == "VN30"
 
-    def test_resolve_benchmark_suffix_map(self):
-        """Known suffixes route to their regional index."""
-        config = {
-            "benchmark_ticker": None,
-            "benchmark_map": {
-                ".T": "^N225", ".HK": "^HSI", ".NS": "^NSEI",
-                ".L": "^FTSE", ".TO": "^GSPTSE", ".AX": "^AXJO",
-                ".BO": "^BSESN", "": "SPY",
-            },
-        }
-        assert settlement.resolve_benchmark("7203.T", config) == "^N225"
-        assert settlement.resolve_benchmark("0700.HK", config) == "^HSI"
-        assert settlement.resolve_benchmark("RELIANCE.NS", config) == "^NSEI"
-        assert settlement.resolve_benchmark("AZN.L", config) == "^FTSE"
+    def test_resolve_benchmark_default_config_is_vnindex(self):
+        from tradingagents.default_config import DEFAULT_CONFIG
+
+        assert DEFAULT_CONFIG["benchmark_ticker"] == "VNINDEX"
+        assert settlement.resolve_benchmark("FPT", DEFAULT_CONFIG) == "VNINDEX"
 
     def test_explicit_benchmark_is_resolved_like_any_other_symbol(self):
         """A configured benchmark takes the same alias mapping as the ticker, or
         the return lookup finds nothing and the decision never settles."""
-        config = {"benchmark_ticker": "SPX500", "benchmark_map": {"": "SPY"}}
-        assert settlement.resolve_benchmark("NVDA", config) == "^GSPC"
+        for alias in ("VN-INDEX", "vnindex", "^VNINDEX", "VNI"):
+            config = {"benchmark_ticker": alias, "benchmark_map": {"": "VN30"}}
+            assert settlement.resolve_benchmark("FPT", config) == "VNINDEX"
+        config = {"benchmark_ticker": "HNX-INDEX"}
+        assert settlement.resolve_benchmark("SHS", config) == "HNX"
 
-    def test_resolve_benchmark_china_a_shares(self):
-        """A-share tickers route to their exchange composite (uses the real
-        default benchmark_map, since A-share support relies on it)."""
-        from tradingagents.default_config import DEFAULT_CONFIG
-        config = {"benchmark_ticker": None,
-                             "benchmark_map": DEFAULT_CONFIG["benchmark_map"]}
-        assert settlement.resolve_benchmark("600519.SS", config) == "000001.SS"
-        assert settlement.resolve_benchmark("000001.SZ", config) == "399001.SZ"
-        # .SH is the exchange's own suffix; Yahoo spells Shanghai .SS (#1260)
-        assert settlement.resolve_benchmark("600519.SH", config) == "000001.SS"
+    def test_resolve_benchmark_map_entry_for_the_ticker(self):
+        """A config that still sets a benchmark_map routes a code by its ending."""
+        config = {"benchmark_ticker": None, "benchmark_map": {"": "VNINDEX", "PG": "VN30"}}
+        assert settlement.resolve_benchmark("HPG", config) == "VN30"
+        assert settlement.resolve_benchmark("FPT", config) == "VNINDEX"
 
-    def test_resolve_benchmark_brazil(self):
-        """B3 tickers were measured against SPY."""
-        from tradingagents.default_config import DEFAULT_CONFIG
-        config = {"benchmark_ticker": None,
-                             "benchmark_map": DEFAULT_CONFIG["benchmark_map"]}
-        assert settlement.resolve_benchmark("PETR4.SA", config) == "^BVSP"
+    def test_resolve_benchmark_empty_suffix_entry_is_the_fallback(self):
+        config = {"benchmark_ticker": None, "benchmark_map": {"": "VN30"}}
+        assert settlement.resolve_benchmark("FPT", config) == "VN30"
 
-    @pytest.mark.parametrize(("ticker", "index"), [
-        ("2330.TW", "^TWII"), ("6488.TWO", "^TWII"), ("005930.KS", "^KS11"), ("247540.KQ", "^KQ11"), ("D05.SI", "^STI"), ("SAP.DE", "^GDAXI"),
-        ("MC.PA", "^FCHI"), ("ASML.AS", "^AEX"), ("NESN.SW", "^SSMI"), ("ENI.MI", "FTSEMIB.MI"),
-    ])
-    def test_resolve_benchmark_regional_indexes(self, ticker, index):
-        """Taiwan, Korea, Singapore and the main European exchanges were measured against SPY."""
-        from tradingagents.default_config import DEFAULT_CONFIG
-        config = {"benchmark_ticker": None, "benchmark_map": DEFAULT_CONFIG["benchmark_map"]}
-        assert settlement.resolve_benchmark(ticker, config) == index
-
-    def test_resolve_benchmark_us_ticker_defaults_to_spy(self):
-        """US tickers (no dotted suffix) take the empty-suffix entry."""
-        config = {
-            "benchmark_ticker": None,
-            "benchmark_map": {"": "SPY", ".T": "^N225"},
-        }
-        assert settlement.resolve_benchmark("NVDA", config) == "SPY"
-        assert settlement.resolve_benchmark("AAPL", config) == "SPY"
-
-    def test_resolve_benchmark_unknown_suffix_falls_back(self):
-        """Unrecognised suffix (BRK.B, FAKE.XX) falls back to SPY."""
-        config = {
-            "benchmark_ticker": None,
-            "benchmark_map": {"": "SPY", ".T": "^N225"},
-        }
-        assert settlement.resolve_benchmark("FAKE.XX", config) == "SPY"
-        assert settlement.resolve_benchmark("BRK.B", config) == "SPY"
+    def test_resolve_benchmark_without_any_config_is_vnindex(self):
+        """No benchmark_ticker and no map: VNINDEX."""
+        assert settlement.resolve_benchmark("FPT", {}) == "VNINDEX"
+        assert settlement.resolve_benchmark("HPG", {"benchmark_ticker": None, "benchmark_map": {}}) == "VNINDEX"
 
     def test_resolve_benchmark_case_insensitive(self):
-        """Suffix matching is case-insensitive so 7203.t resolves like 7203.T."""
-        config = {
-            "benchmark_ticker": None,
-            "benchmark_map": {".T": "^N225", "": "SPY"},
-        }
-        assert settlement.resolve_benchmark("7203.t", config) == "^N225"
+        """The ticker is normalised before matching, so fpt.vn resolves like FPT."""
+        config = {"benchmark_ticker": None, "benchmark_map": {"FPT": "VN30", "": "VNINDEX"}}
+        assert settlement.resolve_benchmark("fpt.vn", config) == "VN30"
 
     def test_reflector_includes_benchmark_in_label(self):
-        """benchmark_name appears in the prompt label, not 'SPY' hardcoded."""
+        """benchmark_name appears in the prompt label, not a hardcoded index."""
         mock_llm = MagicMock()
         mock_llm.invoke.return_value.content = "Directionally correct."
         reflector = Reflector(mock_llm)
@@ -671,15 +635,15 @@ class TestDeferredReflection:
             final_decision=DECISION_BUY,
             raw_return=0.05,
             alpha_return=0.02,
-            benchmark_name="^N225",
+            benchmark_name="VN30",
         )
         messages = mock_llm.invoke.call_args[0][0]
         human_content = next(content for role, content in messages if role == "human")
-        assert "Alpha vs ^N225:" in human_content
-        assert "Alpha vs SPY:" not in human_content
+        assert "Alpha vs VN30:" in human_content
+        assert "Alpha vs VNINDEX:" not in human_content
 
-    def test_reflector_defaults_to_spy_for_unupdated_callers(self):
-        """Default benchmark_name keeps the SPY label for legacy callers."""
+    def test_reflector_defaults_to_vnindex_for_unupdated_callers(self):
+        """Default benchmark_name is the VNINDEX label for callers that pass none."""
         mock_llm = MagicMock()
         mock_llm.invoke.return_value.content = "ok"
         reflector = Reflector(mock_llm)
@@ -690,27 +654,27 @@ class TestDeferredReflection:
         )
         messages = mock_llm.invoke.call_args[0][0]
         human_content = next(content for role, content in messages if role == "human")
-        assert "Alpha vs SPY:" in human_content
+        assert "Alpha vs VNINDEX:" in human_content
 
     # settlement.settle_pending
 
     def test_resolve_skips_other_tickers(self, tmp_path):
-        """Pending AAPL entry is not resolved when the run is for NVDA."""
+        """Pending HPG entry is not resolved when the run is for FPT."""
         log = make_log(tmp_path)
-        log.store_decision("AAPL", "2026-01-10", DECISION_BUY)
+        log.store_decision("HPG", "2026-01-10", DECISION_BUY)
         with patch.object(settlement, "fetch_returns", return_value=(0.05, 0.02, 5, "2026-01-12")) as fetch:
-            settlement.settle_pending("NVDA", log, MagicMock(), {})
+            settlement.settle_pending("FPT", log, MagicMock(), {})
         fetch.assert_not_called()
         assert len(log.get_pending_entries()) == 1
 
     def test_resolve_marks_entry_completed(self, tmp_path):
         """After resolve, get_pending_entries() is empty and the entry has a REFLECTION."""
         log = make_log(tmp_path)
-        log.store_decision("NVDA", "2026-01-05", DECISION_BUY)
+        log.store_decision("FPT", "2026-01-05", DECISION_BUY)
         reflector = MagicMock()
         reflector.reflect_on_final_decision.return_value = "Momentum confirmed."
         with patch.object(settlement, "fetch_returns", return_value=(0.05, 0.02, 5, "2026-01-12")):
-            settlement.settle_pending("NVDA", log, reflector, {})
+            settlement.settle_pending("FPT", log, reflector, {})
         assert log.get_pending_entries() == []
         entries = log.load_entries()
         assert len(entries) == 1
@@ -723,10 +687,10 @@ class TestDeferredReflection:
         """#1169: when the outcome can't be settled yet (fetch_returns None),
         the entry stays pending and the reflector is never called."""
         log = make_log(tmp_path)
-        log.store_decision("NVDA", "2026-01-05", DECISION_BUY)
+        log.store_decision("FPT", "2026-01-05", DECISION_BUY)
         reflector = MagicMock()
         with patch.object(settlement, "fetch_returns", return_value=(None, None, None, None)):
-            settlement.settle_pending("NVDA", log, reflector, {})
+            settlement.settle_pending("FPT", log, reflector, {})
         assert len(log.get_pending_entries()) == 1  # still pending
         reflector.reflect_on_final_decision.assert_not_called()
 
@@ -741,13 +705,13 @@ class TestPortfolioManagerInjection:
 
     def test_past_context_in_initial_state(self):
         propagator = Propagator()
-        state = propagator.create_initial_state("NVDA", "2026-01-10", past_context="some context")
+        state = propagator.create_initial_state("FPT", "2026-01-10", past_context="some context")
         assert "past_context" in state
         assert state["past_context"] == "some context"
 
     def test_past_context_defaults_to_empty(self):
         propagator = Propagator()
-        state = propagator.create_initial_state("NVDA", "2026-01-10")
+        state = propagator.create_initial_state("FPT", "2026-01-10")
         assert state["past_context"] == ""
 
     # PM prompt
@@ -756,7 +720,7 @@ class TestPortfolioManagerInjection:
         captured = {}
         llm = _structured_pm_llm(captured)
         pm_node = create_portfolio_manager(llm)
-        state = _make_pm_state(past_context="[2026-01-05 | NVDA | Buy | +5.0% | +2.0% | 5d]\nGreat call.")
+        state = _make_pm_state(past_context="[2026-01-05 | FPT | Buy | +5.0% | +2.0% | 5d]\nGreat call.")
         pm_node(state)
         assert "Lessons from prior decisions and outcomes" in captured["prompt"]
         assert "Great call." in captured["prompt"]
@@ -776,53 +740,72 @@ class TestPortfolioManagerInjection:
         can parse without any extra LLM call."""
         captured = {}
         decision = PortfolioDecision(
-            rating=PortfolioRating.OVERWEIGHT,
             executive_summary="Build position gradually over the next two weeks.",
-            investment_thesis="AI capex cycle remains intact; institutional flows constructive.",
-            price_target=215.0,
-            time_horizon="3-6 months",
+            investment_thesis="Lợi nhuận quý tăng; khối ngoại mua ròng.",
+            key_risks="Thủng 67.000 VND.",
+            time_horizon="2-4 tuần",
         )
         llm = _structured_pm_llm(captured, decision)
         pm_node = create_portfolio_manager(llm)
-        result = pm_node(_make_pm_state())
+        state = _make_pm_state()
+        state["quant_decision"] = {"action": "BUY", "exchange": "HOSE", "target_price": 78000.0}
+        state["quant_report"] = "ENGINE REPORT: FPT BUY"
+        result = pm_node(state)
         md = result["final_trade_decision"]
-        assert "**Rating**: Overweight" in md
+        # The rating and the price target are the engine's, never the model's.
+        assert md.startswith("**Rating**: BUY")
         assert "**Executive Summary**: Build position gradually" in md
-        assert "**Investment Thesis**: AI capex cycle" in md
-        assert "**Price Target**: 215.0" in md
-        assert "**Time Horizon**: 3-6 months" in md
+        assert "**Investment Thesis**: Lợi nhuận quý tăng" in md
+        assert "**Key Risks**: Thủng 67.000 VND." in md
+        assert "**Price Target**: 78.000 VND" in md
+        assert "**Time Horizon**: 2-4 tuần" in md
+        assert result["final_rating"] == "BUY"
+
+    def test_pm_without_an_engine_decision_rates_no_trade(self):
+        """When the quant engine could not run, the final rating is NO_TRADE."""
+        result = create_portfolio_manager(_structured_pm_llm({}))(_make_pm_state())
+        assert result["final_rating"] == "NO_TRADE"
+        assert result["final_trade_decision"].startswith("**Rating**: NO_TRADE")
+        assert "**Price Target**: not provided" in result["final_trade_decision"]
 
     def test_pm_falls_back_to_freetext_when_structured_unavailable(self):
         """If a provider does not support with_structured_output, the agent
         falls back to a plain invoke and returns whatever prose the model
-        produced, so the pipeline never blocks."""
+        produced, so the pipeline never blocks. The rating line is still the
+        engine's: a model that answers Sell does not change a HOLD."""
         plain_response = "**Rating**: Sell\n\nExit ahead of guidance."
         llm = MagicMock()
         llm.with_structured_output.side_effect = NotImplementedError("provider unsupported")
         llm.invoke.return_value = MagicMock(content=plain_response)
         pm_node = create_portfolio_manager(llm)
-        result = pm_node(_make_pm_state())
-        assert result["final_trade_decision"] == plain_response
+        state = _make_pm_state()
+        state["quant_decision"] = {"action": "HOLD", "exchange": "HOSE", "target_price": 78000.0}
+        result = pm_node(state)
+        decision = result["final_trade_decision"]
+        assert decision.startswith("**Rating**: HOLD")
+        assert plain_response in decision
+        assert decision.rstrip().endswith("**Price Target**: 78.000 VND")
+        assert result["final_rating"] == "HOLD"
 
     # get_past_context ordering and limits
 
     def test_same_ticker_prioritised(self, tmp_path):
         """Same-ticker entries in same-ticker section; cross-ticker entries in cross-ticker section."""
         log = make_log(tmp_path)
-        _resolve_entry(log, "NVDA", "2026-01-05", DECISION_BUY, "Momentum confirmed.")
-        _resolve_entry(log, "AAPL", "2026-01-06", DECISION_SELL, "Overvalued.")
-        result = log.get_past_context("NVDA")
-        assert "Past analyses of NVDA" in result
+        _resolve_entry(log, "FPT", "2026-01-05", DECISION_BUY, "Momentum confirmed.")
+        _resolve_entry(log, "HPG", "2026-01-06", DECISION_SELL, "Overvalued.")
+        result = log.get_past_context("FPT")
+        assert "Past analyses of FPT" in result
         assert "Recent cross-ticker lessons" in result
         same_block, cross_block = result.split("Recent cross-ticker lessons")
-        assert "NVDA" in same_block
-        assert "AAPL" in cross_block
+        assert "FPT" in same_block
+        assert "HPG" in cross_block
 
     def test_cross_ticker_reflection_only(self, tmp_path):
         """Cross-ticker entries show only the REFLECTION text, not the full DECISION."""
         log = make_log(tmp_path)
-        _resolve_entry(log, "AAPL", "2026-01-06", DECISION_SELL, "Overvalued correction.")
-        result = log.get_past_context("NVDA")
+        _resolve_entry(log, "HPG", "2026-01-06", DECISION_SELL, "Overvalued correction.")
+        result = log.get_past_context("FPT")
         assert "Overvalued correction." in result
         assert "Exit position immediately." not in result
 
@@ -830,18 +813,18 @@ class TestPortfolioManagerInjection:
         """More than 5 same-ticker completed entries → only 5 injected."""
         log = make_log(tmp_path)
         for i in range(7):
-            _resolve_entry(log, "NVDA", f"2026-01-{i+1:02d}", DECISION_BUY, f"Lesson {i}.")
-        result = log.get_past_context("NVDA", n_same=5)
+            _resolve_entry(log, "FPT", f"2026-01-{i+1:02d}", DECISION_BUY, f"Lesson {i}.")
+        result = log.get_past_context("FPT", n_same=5)
         lessons_present = sum(1 for i in range(7) if f"Lesson {i}." in result)
         assert lessons_present == 5
 
     def test_n_cross_limit_respected(self, tmp_path):
         """More than 3 cross-ticker completed entries → only 3 injected."""
         log = make_log(tmp_path)
-        tickers = ["AAPL", "MSFT", "TSLA", "AMZN", "GOOG"]
+        tickers = ["HPG", "VCB", "VIC", "MSN", "MWG"]
         for i, ticker in enumerate(tickers):
             _resolve_entry(log, ticker, f"2026-01-{i+1:02d}", DECISION_BUY, f"{ticker} lesson.")
-        result = log.get_past_context("NVDA", n_cross=3)
+        result = log.get_past_context("FPT", n_cross=3)
         cross_count = sum(result.count(f"{t} lesson.") for t in tickers)
         assert cross_count == 3
 
@@ -850,14 +833,14 @@ class TestPortfolioManagerInjection:
     def test_full_cycle_store_resolve_inject(self, tmp_path):
         """store pending → resolve with outcome → past_context non-empty for PM."""
         log = make_log(tmp_path)
-        log.store_decision("NVDA", "2026-01-05", DECISION_BUY)
+        log.store_decision("FPT", "2026-01-05", DECISION_BUY)
         assert len(log.get_pending_entries()) == 1
-        assert log.get_past_context("NVDA") == ""
-        log.update_with_outcome("NVDA", "2026-01-05", 0.05, 0.02, 5, "Correct call.")
+        assert log.get_past_context("FPT") == ""
+        log.update_with_outcome("FPT", "2026-01-05", 0.05, 0.02, 5, "Correct call.")
         assert log.get_pending_entries() == []
-        past_ctx = log.get_past_context("NVDA")
+        past_ctx = log.get_past_context("FPT")
         assert past_ctx != ""
-        assert "NVDA" in past_ctx
+        assert "FPT" in past_ctx
         assert "Correct call." in past_ctx
         assert "DECISION:" in past_ctx
         assert "REFLECTION:" in past_ctx
@@ -895,9 +878,9 @@ class TestLegacyRemoval:
         import functools
 
         fake_state = {
-            "final_trade_decision": "Rating: Buy\nBuy NVDA.",
-            "final_rating": "Buy",
-            "company_of_interest": "NVDA",
+            "final_trade_decision": "Rating: Buy\nBuy FPT.",
+            "final_rating": "BUY",
+            "company_of_interest": "FPT",
             "trade_date": "2026-01-10",
             "market_report": "",
             "sentiment_report": "",
@@ -931,10 +914,10 @@ class TestLegacyRemoval:
         mock_graph.record_decision = functools.partial(
             TradingAgentsGraph.record_decision, mock_graph
         )
-        TradingAgentsGraph.propagate(mock_graph, "NVDA", "2026-01-10")
+        TradingAgentsGraph.propagate(mock_graph, "FPT", "2026-01-10")
         entries = mock_graph.memory_log.load_entries()
         assert len(entries) == 1
-        assert entries[0]["ticker"] == "NVDA"
+        assert entries[0]["ticker"] == "FPT"
         assert entries[0]["pending"] is True
 
 
@@ -948,9 +931,9 @@ def test_a_failed_reflection_leaves_the_entry_pending_and_lets_the_run_start(tmp
     graph = object.__new__(TradingAgentsGraph)
     graph.config = {"memory_log_path": str(tmp_path / "m.md")}
     graph.memory_log = TradingMemoryLog(graph.config)
-    graph.memory_log.store_decision("NVDA", "2026-01-05", "Rating: Buy\n\nx")
-    graph.memory_log.store_decision("NVDA", "2026-01-12", "Rating: Sell\n\ny")
-    monkeypatch.setattr(settlement, "resolve_benchmark", lambda t, c: "SPY")
+    graph.memory_log.store_decision("FPT", "2026-01-05", "Rating: Buy\n\nx")
+    graph.memory_log.store_decision("FPT", "2026-01-12", "Rating: Sell\n\ny")
+    monkeypatch.setattr(settlement, "resolve_benchmark", lambda t, c: "VNINDEX")
     monkeypatch.setattr(settlement, "fetch_returns",
                         lambda t, d, holding_days=5, benchmark=None: (0.01, 0.005, holding_days, "2026-01-19"))
 
@@ -965,7 +948,7 @@ def test_a_failed_reflection_leaves_the_entry_pending_and_lets_the_run_start(tmp
 
     graph.reflector = _Reflector()
 
-    graph.settle_pending("NVDA")  # must not raise
+    graph.settle_pending("FPT")  # must not raise
 
     entries = graph.memory_log.load_entries()
     assert [e["pending"] for e in entries] == [True, False]  # the failed one waits for next time
@@ -981,8 +964,8 @@ def test_the_holding_window_is_configurable(tmp_path, monkeypatch):
     graph = object.__new__(TradingAgentsGraph)
     graph.config = {"memory_log_path": str(tmp_path / "m.md"), "holding_period_days": 21}
     graph.memory_log = TradingMemoryLog(graph.config)
-    graph.memory_log.store_decision("NVDA", "2026-01-05", "**Rating**: Buy\n\nx")
-    monkeypatch.setattr(settlement, "resolve_benchmark", lambda t, c: "SPY")
+    graph.memory_log.store_decision("FPT", "2026-01-05", "**Rating**: Buy\n\nx")
+    monkeypatch.setattr(settlement, "resolve_benchmark", lambda t, c: "VNINDEX")
     asked = {}
 
     def _returns(ticker, date, holding_days=5, benchmark=None):
@@ -992,7 +975,7 @@ def test_the_holding_window_is_configurable(tmp_path, monkeypatch):
     monkeypatch.setattr(settlement, "fetch_returns", _returns)
     graph.reflector = type("R", (), {"reflect_on_final_decision": lambda self, **kw: "lesson"})()
 
-    graph.settle_pending("NVDA")
+    graph.settle_pending("FPT")
 
     assert asked["holding_days"] == 21
     assert graph.memory_log.load_entries()[0]["holding"] == "21d"
@@ -1014,19 +997,14 @@ def test_a_longer_window_asks_for_enough_price_history(monkeypatch):
     of bars, and asking for 28 days left every outcome unsettled."""
     asked = {}
 
-    class _Ticker:
-        def __init__(self, symbol):
-            self.symbol = symbol
+    def _get_closes(symbol, start, end):
+        asked[symbol] = (start, end)
+        days = pd.bdate_range(start, end, inclusive="left")
+        return pd.Series([100.0 + i for i in range(len(days))], index=days)
 
-        def history(self, start, end):
-            asked["start"], asked["end"] = start, end
-            import pandas as pd
-            days = pd.bdate_range(start, end)
-            return pd.DataFrame({"Close": range(len(days))}, index=days)
+    monkeypatch.setattr(settlement, "get_closes", _get_closes)
 
-    monkeypatch.setattr("tradingagents.dataflows.vendors.yahoo.market.yf.Ticker", _Ticker)
-
-    raw, alpha, days, resolved = settlement.fetch_returns("NVDA", "2026-06-01", 21, benchmark="SPY")
+    raw, alpha, days, resolved = settlement.fetch_returns("FPT", "2026-06-01", 21, benchmark="VNINDEX")
 
     assert days == 21 and resolved is not None, (raw, alpha, days, resolved)
 
@@ -1074,52 +1052,55 @@ def _closes(by_symbol):
 class TestSettlementWindow:
     """Stock and benchmark are measured over the same dates, whatever their calendars."""
 
-    def test_a_seven_day_market_is_scored_against_the_benchmark_over_the_same_dates(self, monkeypatch):
-        coin = pd.Series([100.0 + i for i in range(10)], index=pd.date_range("2026-01-03", periods=10, freq="D"))
+    def test_a_suspended_stock_is_scored_against_the_index_over_the_same_dates(self, monkeypatch):
+        # HPG is suspended on Tue 6 and Wed 7: its five sessions after entry end on Wed 14,
+        # and VNINDEX, which traded every day, is valued over that same span.
+        sessions = pd.bdate_range("2026-01-05", "2026-01-16").delete([1, 2])
+        stock = pd.Series([100.0 + i for i in range(len(sessions))], index=sessions)
         weekdays = pd.bdate_range("2025-12-29", "2026-01-16")
-        spy = pd.Series([400.0 + 2 * i for i in range(len(weekdays))], index=weekdays)
-        monkeypatch.setattr(settlement, "get_closes", _closes({"BTC-USD": coin, "SPY": spy}))
+        index = pd.Series([1200.0 + 2 * i for i in range(len(weekdays))], index=weekdays)
+        monkeypatch.setattr(settlement, "get_closes", _closes({"HPG": stock, "VNINDEX": index}))
 
-        raw, alpha, days, resolved = settlement.fetch_returns("BTC-USD", "2026-01-03", 5, "SPY")
+        raw, alpha, days, resolved = settlement.fetch_returns("HPG", "2026-01-05", 5, "VNINDEX")
 
-        # The coin is held Sat 3 -> Thu 8; SPY over the same span is Fri 2 -> Thu 8.
-        assert resolved == "2026-01-08"
+        assert resolved == "2026-01-14"
         assert raw == pytest.approx(105.0 / 100.0 - 1)
-        assert alpha == pytest.approx(raw - (spy["2026-01-08"] / spy["2026-01-02"] - 1))
+        assert alpha == pytest.approx(raw - (index["2026-01-14"] / index["2026-01-05"] - 1))
 
     def test_bars_stamped_in_different_time_zones_meet_on_their_dates(self, monkeypatch):
-        # Yahoo stamps a coin's daily bar at midnight UTC and SPY's at midnight
-        # New York, five hours later: the same day, not the day after.
-        coin = pd.Series([100.0 + i for i in range(10)],
-                         index=pd.date_range("2026-01-03", periods=10, freq="D", tz="UTC"))
-        weekdays = pd.bdate_range("2025-12-29", "2026-01-16", tz="America/New_York")
-        spy = pd.Series([400.0 + 2 * i for i in range(len(weekdays))], index=weekdays)
-        monkeypatch.setattr(settlement, "get_closes", _closes({"BTC-USD": coin, "SPY": spy}))
+        # One source stamps a session at midnight in Vietnam, another leaves it
+        # naive: the same trading day, not the day before.
+        sessions = pd.bdate_range("2026-01-05", periods=10, tz="Asia/Ho_Chi_Minh")
+        stock = pd.Series([100.0 + i for i in range(10)], index=sessions)
+        weekdays = pd.bdate_range("2025-12-29", "2026-01-23")
+        index = pd.Series([1200.0 + 2 * i for i in range(len(weekdays))], index=weekdays)
+        monkeypatch.setattr(settlement, "get_closes", _closes({"FPT": stock, "VNINDEX": index}))
 
-        raw, alpha, _, resolved = settlement.fetch_returns("BTC-USD", "2026-01-03", 5, "SPY")
+        raw, alpha, _, resolved = settlement.fetch_returns("FPT", "2026-01-05", 5, "VNINDEX")
 
-        assert resolved == "2026-01-08"
-        spy_by_day = spy.tz_localize(None)
-        assert alpha == pytest.approx(raw - (spy_by_day["2026-01-08"] / spy_by_day["2026-01-02"] - 1))
+        assert resolved == "2026-01-12"
+        assert raw == pytest.approx(105.0 / 100.0 - 1)
+        assert alpha == pytest.approx(raw - (index["2026-01-12"] / index["2026-01-05"] - 1))
 
     def test_the_outcome_waits_for_the_benchmark_to_trade_through_the_window(self, monkeypatch):
-        coin = pd.Series([100.0 + i for i in range(10)], index=pd.date_range("2026-01-03", periods=10, freq="D"))
-        spy = pd.Series([400.0, 401.0, 402.0], index=pd.to_datetime(["2026-01-02", "2026-01-05", "2026-01-06"]))
-        monkeypatch.setattr(settlement, "get_closes", _closes({"BTC-USD": coin, "SPY": spy}))
+        stock = pd.Series([100.0 + i for i in range(10)], index=pd.bdate_range("2026-01-05", periods=10))
+        index = pd.Series([1200.0, 1201.0, 1202.0],
+                          index=pd.to_datetime(["2026-01-02", "2026-01-05", "2026-01-06"]))
+        monkeypatch.setattr(settlement, "get_closes", _closes({"FPT": stock, "VNINDEX": index}))
 
-        assert settlement.fetch_returns("BTC-USD", "2026-01-03", 5, "SPY") == (None, None, None, None)
+        assert settlement.fetch_returns("FPT", "2026-01-05", 5, "VNINDEX") == (None, None, None, None)
 
     def test_a_missing_close_is_skipped_not_scored(self, monkeypatch):
         idx = pd.bdate_range("2026-01-05", periods=8)
         stock = pd.Series([100.0, float("nan"), 101.0, 102.0, 103.0, 104.0, 105.0, 106.0], index=idx)
-        spy = pd.Series([400.0 + i for i in range(8)], index=idx)
-        monkeypatch.setattr(settlement, "get_closes", _closes({"NVDA": stock, "SPY": spy}))
+        index = pd.Series([400.0 + i for i in range(8)], index=idx)
+        monkeypatch.setattr(settlement, "get_closes", _closes({"FPT": stock, "VNINDEX": index}))
 
-        raw, alpha, _, resolved = settlement.fetch_returns("NVDA", "2026-01-05", 5, "SPY")
+        raw, alpha, _, resolved = settlement.fetch_returns("FPT", "2026-01-05", 5, "VNINDEX")
 
         assert raw == pytest.approx(105.0 / 100.0 - 1)
         assert resolved == "2026-01-13"
-        assert alpha == pytest.approx(raw - (spy["2026-01-13"] / spy["2026-01-05"] - 1))
+        assert alpha == pytest.approx(raw - (index["2026-01-13"] / index["2026-01-05"] - 1))
 
 
 @pytest.mark.unit
@@ -1127,10 +1108,10 @@ def test_a_close_that_is_not_a_price_is_skipped_not_scored(monkeypatch):
     """A zero close would score as an infinite return and be written to the memory log."""
     idx = pd.bdate_range("2026-01-05", periods=8)
     stock = pd.Series([0.0, 100.0, 101.0, 102.0, 103.0, 104.0, 105.0, 106.0], index=idx)
-    spy = pd.Series([400.0 + i for i in range(8)], index=idx)
-    monkeypatch.setattr(settlement, "get_closes", _closes({"NVDA": stock, "SPY": spy}))
+    index = pd.Series([400.0 + i for i in range(8)], index=idx)
+    monkeypatch.setattr(settlement, "get_closes", _closes({"FPT": stock, "VNINDEX": index}))
 
-    raw, alpha, _, _ = settlement.fetch_returns("NVDA", "2026-01-05", 5, "SPY")
+    raw, alpha, _, _ = settlement.fetch_returns("FPT", "2026-01-05", 5, "VNINDEX")
 
     assert raw == pytest.approx(105.0 / 100.0 - 1)   # the window opens on the first real close
 
@@ -1141,11 +1122,11 @@ class TestSettleAll:
 
     def _setup(self, tmp_path, monkeypatch):
         log = make_log(tmp_path)
-        log.store_decision("AAPL", "2026-01-05", DECISION_BUY)
-        log.store_decision("MSFT", "2026-01-05", DECISION_BUY)
+        log.store_decision("HPG", "2026-01-05", DECISION_BUY)
+        log.store_decision("VCB", "2026-01-05", DECISION_BUY)
         idx = pd.bdate_range("2026-01-02", periods=12)
         series = pd.Series([100.0 + i for i in range(12)], index=idx)
-        monkeypatch.setattr(settlement, "get_closes", _closes({"AAPL": series, "MSFT": series, "SPY": series}))
+        monkeypatch.setattr(settlement, "get_closes", _closes({"HPG": series, "VCB": series, "VNINDEX": series}))
 
         class _Reflector:
             def reflect_on_final_decision(self, **kwargs):
@@ -1157,7 +1138,7 @@ class TestSettleAll:
 
         result = settlement.settle_all_pending(log, reflector, {"holding_period_days": 5})
 
-        assert sorted(result.settled) == [("AAPL", "2026-01-05"), ("MSFT", "2026-01-05")]
+        assert sorted(result.settled) == [("HPG", "2026-01-05"), ("VCB", "2026-01-05")]
         assert result.failed == []
         assert not log.get_pending_entries()
 
@@ -1168,10 +1149,10 @@ class TestSettleAll:
             def reflect_on_final_decision(self, **kwargs):
                 raise RuntimeError("provider down")
 
-        result = settlement.settle_pending("AAPL", log, _Down(), {"holding_period_days": 5})
+        result = settlement.settle_pending("HPG", log, _Down(), {"holding_period_days": 5})
 
-        assert result.settled == [] and [f[:2] for f in result.failed] == [("AAPL", "2026-01-05")]
-        assert {e["ticker"] for e in log.get_pending_entries()} == {"AAPL", "MSFT"}
+        assert result.settled == [] and [f[:2] for f in result.failed] == [("HPG", "2026-01-05")]
+        assert {e["ticker"] for e in log.get_pending_entries()} == {"HPG", "VCB"}
 
 
 @pytest.mark.unit
@@ -1184,9 +1165,9 @@ def test_the_graph_settles_every_ticker_under_its_own_config(tmp_path, monkeypat
     seen = []
     monkeypatch.setattr(settlement, "settle_all_pending",
                         lambda log, reflector, config, wait=True: seen.append(get_config()["output_language"])
-                        or settlement.Settlement(settled=[("AAPL", "2026-01-05")]))
+                        or settlement.Settlement(settled=[("HPG", "2026-01-05")]))
 
-    assert graph.settle_all_pending().settled == [("AAPL", "2026-01-05")]
+    assert graph.settle_all_pending().settled == [("HPG", "2026-01-05")]
     assert seen == ["Deutsch"]
 
 
@@ -1198,9 +1179,9 @@ class TestSettlementOnceAndDurably:
     def _log(self, tmp_path, monkeypatch, *dates):
         log = make_log(tmp_path)
         for date in dates:
-            log.store_decision("AAPL", date, DECISION_BUY)
+            log.store_decision("HPG", date, DECISION_BUY)
         series = pd.Series([100.0 + i for i in range(40)], index=pd.bdate_range("2026-01-02", periods=40))
-        monkeypatch.setattr(settlement, "get_closes", _closes({"AAPL": series, "SPY": series}))
+        monkeypatch.setattr(settlement, "get_closes", _closes({"HPG": series, "VNINDEX": series}))
         return log
 
     def test_two_runs_settling_at_once_reflect_once(self, tmp_path, monkeypatch):
@@ -1218,7 +1199,7 @@ class TestSettlementOnceAndDurably:
 
         results = []
         threads = [threading.Thread(target=lambda: results.append(
-            settlement.settle_pending("AAPL", make_log(tmp_path), _Slow(), {"holding_period_days": 5})))
+            settlement.settle_pending("HPG", make_log(tmp_path), _Slow(), {"holding_period_days": 5})))
             for _ in range(2)]
         [t.start() for t in threads]
         [t.join() for t in threads]
@@ -1239,7 +1220,7 @@ class TestSettlementOnceAndDurably:
                 return "Held up."
 
         with pytest.raises(KeyboardInterrupt):
-            settlement.settle_pending("AAPL", log, _Interrupted(), {"holding_period_days": 5})
+            settlement.settle_pending("HPG", log, _Interrupted(), {"holding_period_days": 5})
 
         assert [e["date"] for e in log.get_pending_entries()] == ["2026-01-12"]
 
@@ -1249,11 +1230,11 @@ class TestSettlementOnceAndDurably:
         log = self._log(tmp_path, monkeypatch, "2026-01-05")
 
         def down(*args, **kwargs):
-            raise VendorUnavailableError("Yahoo Finance request failed: TimeoutError")
+            raise VendorUnavailableError("DNSE request failed: TimeoutError")
 
         monkeypatch.setattr(settlement, "get_closes", down)
 
-        result = settlement.settle_pending("AAPL", log, object(), {"holding_period_days": 5})
+        result = settlement.settle_pending("HPG", log, object(), {"holding_period_days": 5})
 
         assert result.settled == [] and "prices unavailable" in result.failed[0][2]
 
@@ -1261,14 +1242,14 @@ class TestSettlementOnceAndDurably:
 @pytest.mark.unit
 def test_any_failure_to_price_a_decision_is_reported(tmp_path, monkeypatch):
     log = make_log(tmp_path)
-    log.store_decision("AAPL", "2026-01-05", DECISION_BUY)
+    log.store_decision("HPG", "2026-01-05", DECISION_BUY)
 
     def broken(*args, **kwargs):
         raise RuntimeError("vendor outage")
 
     monkeypatch.setattr(settlement, "get_closes", broken)
 
-    result = settlement.settle_pending("AAPL", log, object(), {"holding_period_days": 5})
+    result = settlement.settle_pending("HPG", log, object(), {"holding_period_days": 5})
 
     assert result.settled == [] and "vendor outage" in result.failed[0][2]
 
@@ -1280,7 +1261,7 @@ def test_a_run_does_not_wait_on_another_settlement_pass(tmp_path):
     import time
 
     log = make_log(tmp_path)
-    log.store_decision("AAPL", "2026-01-05", DECISION_BUY)
+    log.store_decision("HPG", "2026-01-05", DECISION_BUY)
     held, release = threading.Event(), threading.Event()
 
     def other_pass():
