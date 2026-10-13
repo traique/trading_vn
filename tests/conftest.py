@@ -58,8 +58,21 @@ def _no_network(request, monkeypatch):
     def refuse(*args, **kwargs):
         raise OSError(f"test tried to reach the network: {args[1:] or kwargs}")
 
-    monkeypatch.setattr(socket.socket, "connect", refuse)
-    monkeypatch.setattr(socket.socket, "connect_ex", refuse)
+    # Loopback is not the network: on Windows every asyncio event loop (the web
+    # app's test client among them) wires itself up with a socket to 127.0.0.1.
+    real_connect, real_connect_ex = socket.socket.connect, socket.socket.connect_ex
+
+    def _loopback(address) -> bool:
+        return isinstance(address, tuple) and address and address[0] in ("127.0.0.1", "::1")
+
+    def connect(self, address):
+        return real_connect(self, address) if _loopback(address) else refuse(self, address)
+
+    def connect_ex(self, address):
+        return real_connect_ex(self, address) if _loopback(address) else refuse(self, address)
+
+    monkeypatch.setattr(socket.socket, "connect", connect)
+    monkeypatch.setattr(socket.socket, "connect_ex", connect_ex)
     monkeypatch.setattr(socket, "getaddrinfo", lambda *a, **k: refuse(None, *a))
 
 

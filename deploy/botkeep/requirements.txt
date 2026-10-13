@@ -1,0 +1,17 @@
+# TradingAgents-VN on Botkeep: only what the web page, the Telegram bot and the
+# analysis need (no CLI libraries, no Anthropic/Google/AWS SDKs: the AI goes
+# through the OpenAI-compatible chain 9Router -> Groq -> OpenRouter -> Grok).
+langchain-core>=1.6.5
+langchain-openai>=1.6.6
+langgraph>=1.2.12
+langgraph-checkpoint-sqlite>=3.1.1
+markdown-it-py>=4.0
+pandas>=2.2
+python-dotenv>=1.0.0
+requests>=2.32.4
+stockstats>=0.6.5
+typing-extensions>=4.14.0
+tzdata>=2024.1
+fastapi>=0.110
+uvicorn>=0.29
+python-multipart>=0.0.9
