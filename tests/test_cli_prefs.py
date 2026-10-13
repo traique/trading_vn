@@ -71,10 +71,10 @@ def test_an_unknown_provider_drops_itself_and_its_models():
 
 
 @pytest.mark.unit
-def test_analysts_are_narrowed_to_the_asset_type():
-    kept = sanitize(SAVED, "crypto")
-    assert AnalystType.FUNDAMENTALS.value not in kept["analysts"]
+def test_every_remembered_analyst_is_kept_for_a_stock():
+    kept = sanitize(SAVED, "stock")
     assert AnalystType.MARKET.value in kept["analysts"]
+    assert set(kept["analysts"]) <= {a.value for a in AnalystType}
 
 
 @pytest.mark.unit

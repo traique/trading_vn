@@ -1,19 +1,27 @@
-"""Trader: turns the Research Manager's investment plan into a concrete transaction proposal."""
+"""Trader: turns the system decision into an execution plan under Vietnamese market rules.
+
+The action, entry zone, stop, targets and position size are the quantitative
+engine's; the trader explains them against the research plan and the market
+report and plans the execution (order sessions, board lots, price band, T+2
+settlement). The rendered proposal carries the engine's numbers, never the
+model's.
+"""
 
 from __future__ import annotations
 
 from langchain_core.messages import AIMessage
 
+from tradingagents.agents import vn_context
 from tradingagents.agents.context import (
     get_instrument_context_from_state,
     get_language_instruction,
     get_portfolio_context_from_state,
 )
-from tradingagents.agents.schemas import TraderProposal, render_trader_proposal
+from tradingagents.agents.schemas import TraderProposal, plan_lines, render_trader_proposal
 from tradingagents.agents.structured import (
     NO_EXTERNAL_TOOLS,
     bind_structured,
-    invoke_structured_or_freetext,
+    invoke_structured,
 )
 
 
@@ -24,71 +32,61 @@ def create_trader(llm):
         company_name = state["company_of_interest"]
         instrument_context = get_instrument_context_from_state(state)
         investment_plan = state["investment_plan"]
-        # The research plan digests the debate but loses exact price structure;
-        # give the Trader the technical market report so entry/stop levels are
-        # grounded in real ATR / support-resistance / current price (#1167). The
-        # report is empty when the user did not select the market analyst, so
-        # only offer it (and the grounding instruction) when it has content.
         market_report = (state["market_report"] or "").strip()
         portfolio_context = get_portfolio_context_from_state(state)
-
-        if market_report:
-            grounding = (
-                "Ground concrete price levels (entry, stop-loss, position sizing) in the technical "
-                "market report's price structure -- current price, support/resistance, ATR, and "
-                "volatility -- and use the research plan for direction and strategy. "
-            )
-            report_section = f"Technical Market Report:\n{market_report}\n\n"
-        else:
-            grounding = ""
-            report_section = ""
+        decision = vn_context.quant_decision(state)
+        action = vn_context.action_of(state)
+        report_section = f"Technical Market Report:\n{market_report}\n\n" if market_report else ""
 
         messages = [
             {
                 "role": "system",
                 "content": (
-                    "You are a trading agent analyzing market data to make investment decisions. "
-                    "Based on your analysis, provide a specific recommendation to buy, sell, or hold. "
-                    + grounding
-                    # Entry/stop are numeric price fields. Asking for concrete
-                    # levels invites a percentage ("15%"), which is not a price
-                    # and fails the structured parse (#1288).
-                    + "State entry price and stop-loss as absolute price levels in the "
-                    "instrument's quote currency (for example 189.5), never a percentage "
-                    "or a range; convert a percentage distance to the price level it "
-                    "implies, or omit the field if you cannot state a number. "
-                    + NO_EXTERNAL_TOOLS
+                    "You are the trader of a Vietnamese equity desk. The quantitative system has "
+                    f"already decided the action ({action}) and every number of the plan; you explain "
+                    "the plan and how to execute it, and you may not change the action or any number. "
+                    + vn_context.market_rules(state)
+                    + "\n\n" + vn_context.NO_INVENT_RULE
+                    + "\n\n" + vn_context.GROUNDING_RULES
+                    + "\n" + NO_EXTERNAL_TOOLS
                     + get_language_instruction()
                 ),
             },
             {
                 "role": "user",
                 "content": (
-                    f"Here is the research team's investment plan for {company_name}. "
+                    f"Here is the research team's assessment for {company_name}. "
                     f"{instrument_context}\n\n"
+                    f"{vn_context.quant_block(state)}\n\n"
                     f"{report_section}"
                     f"{portfolio_context}\n\n"
-                    f"Proposed Investment Plan:\n{investment_plan}\n\n"
-                    "Make an informed, strategic trading decision.\n\n"
+                    f"Research Manager's assessment:\n{investment_plan}\n\n"
                     "## Output\n\n"
-                    "Write these sections, in this order, starting with the action "
-                    "on its own line:\n\n"
-                    "- **Action**: exactly one of Buy / Hold / Sell. A research "
-                    "recommendation of Overweight is a Buy and Underweight is a Sell, "
-                    "sized by how strong the case is; conflict alone is not a Hold.\n"
-                    "- **Reasoning**: why, against the plan and the price structure\n"
-                    "- **Entry Price**, **Stop Loss**, **Position Sizing**: when you can state them"
+                    "- **Reasoning**: why the evidence supports (or strains) the system action\n"
+                    "- **Execution Notes**: how to execute it - which session (ATO / continuous / "
+                    "ATC), splitting into board lots of 100, the price band and tick size, the T+2 "
+                    "settlement constraint, liquidity. If the action has no plan, say what would have "
+                    "to change for the system to issue one."
                 ),
             },
         ]
 
-        trader_plan = invoke_structured_or_freetext(
-            structured_llm,
-            llm,
-            messages,
-            render_trader_proposal,
-            "Trader",
-        )
+        proposal = invoke_structured(structured_llm, messages, "Trader")
+        if proposal is not None:
+            trader_plan = render_trader_proposal(proposal, decision)
+        else:
+            # Free text keeps the model's prose, but the numbers and the action
+            # line are always the engine's.
+            prose = llm.invoke(messages).content
+            trader_plan = "\n".join([
+                f"**Action**: {action} (hành động của hệ thống định lượng)",
+                "",
+                prose,
+                "",
+                *plan_lines(decision),
+                "",
+                f"FINAL TRANSACTION PROPOSAL: **{action}**",
+            ])
 
         return {
             "messages": [AIMessage(content=trader_plan)],

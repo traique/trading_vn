@@ -47,13 +47,6 @@ _own_file_locations()
 def pytest_configure(config):
     for marker in ("unit", "integration", "smoke"):
         config.addinivalue_line("markers", f"{marker}: {marker}-level tests")
-    # yfinance caches each symbol's time zone on disk, in the home directory
-    # by default; the suite keeps it in a directory of its own.
-    import tempfile
-
-    import yfinance
-
-    yfinance.set_tz_cache_location(tempfile.mkdtemp(prefix="tradingagents-tests-yf-"))
 
 
 @pytest.fixture(autouse=True)
@@ -68,11 +61,16 @@ def _no_network(request, monkeypatch):
     monkeypatch.setattr(socket.socket, "connect", refuse)
     monkeypatch.setattr(socket.socket, "connect_ex", refuse)
     monkeypatch.setattr(socket, "getaddrinfo", lambda *a, **k: refuse(None, *a))
-    # yfinance's HTTP client is libcurl, which never touches Python's sockets.
-    from curl_cffi import requests as curl_requests
 
-    monkeypatch.setattr(curl_requests.Session, "request", refuse)
-    monkeypatch.setattr(curl_requests.AsyncSession, "request", refuse)
+
+@pytest.fixture(autouse=True)
+def _fresh_vci_cache():
+    """VCI responses are cached per process; each test starts without them."""
+    from tradingagents.dataflows.vendors import vci
+
+    vci.clear_cache()
+    yield
+    vci.clear_cache()
 
 
 @pytest.fixture(autouse=True)

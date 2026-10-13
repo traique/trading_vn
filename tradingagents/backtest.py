@@ -3,8 +3,10 @@
 One run yields one decision, so it cannot say whether the system decides well.
 This runs the same machinery over many (ticker, date) cells and reads the
 aggregate. The memory log is the results table: every run already records its
-rating and later settles it with realized and alpha return against the
-instrument's regional benchmark, so there is nothing to record separately.
+action and later settles it with realized and alpha return against VNINDEX,
+so there is nothing to record separately. A BUY is also scored net of the
+Vietnamese round-trip costs (fees, sales tax, slippage), since that is what
+the call would have earned.
 
 Scope: this evaluates decision quality. It is not a portfolio simulator, and
 must not grow one. Turning a rating into a filled order needs a quantity, a fill
@@ -24,8 +26,9 @@ from pathlib import Path
 
 from tradingagents.agents.rating import RATING_REVIEW
 from tradingagents.dataflows.date_window import get_current_date
-from tradingagents.dataflows.symbols import safe_ticker_component
+from tradingagents.dataflows.symbols import normalize_symbol, safe_ticker_component
 from tradingagents.graph.trading_graph import TradingAgentsGraph
+from tradingagents.market import vn_rules
 from tradingagents.memory import TradingMemoryLog
 
 logger = logging.getLogger(__name__)
@@ -85,9 +88,11 @@ class BacktestResult:
     settlement_failures: list[tuple[str, str]] = field(default_factory=list)
 
 
-# What each rating claims will happen, so an outcome can be scored against it.
-# Hold claims no direction, so nothing about alpha proves it right or wrong.
-_DIRECTION = {"Buy": 1, "Overweight": 1, "Hold": 0, "Underweight": -1, "Sell": -1}
+# What each action claims will happen, so an outcome can be scored against it.
+# HOLD, WATCH and NO_TRADE claim no direction, so nothing about alpha proves
+# them right or wrong. SELL exits a holding (no short selling): it claims the
+# stock will underperform.
+_DIRECTION = {"BUY": 1, "HOLD": 0, "WATCH": 0, "NO_TRADE": 0, "SELL": -1}
 
 
 @dataclass
@@ -95,6 +100,8 @@ class RatingScore:
     count: int
     hit_rate: float | None
     mean_alpha: float
+    # BUY only: the mean alpha after a round trip's fees, tax and slippage.
+    mean_alpha_net: float | None = None
 
 
 @dataclass
@@ -111,9 +118,11 @@ class BacktestSummary:
         for rating, score in self.by_rating.items():
             called = (f"called the direction {score.hit_rate:.0%}"
                       if score.hit_rate is not None else "no direction claimed")
+            net = (f", {score.mean_alpha_net:+.2%} after costs"
+                   if score.mean_alpha_net is not None else "")
             lines.append(
                 f"- {rating}: n={score.count}, {called}, "
-                f"mean alpha {score.mean_alpha:+.2%} vs the benchmark"
+                f"mean alpha {score.mean_alpha:+.2%} vs the benchmark{net}"
             )
         lines.append("")
         if self.pending:
@@ -155,8 +164,10 @@ def run_backtest(
     result = BacktestResult(run_id=run_id, log_path=Path(run_config["memory_log_path"]))
     done = {(e["ticker"], e["date"]) for e in graph.memory_log.load_entries()}
 
-    # A ticker or date given twice is one cell, run and settled once.
-    tickers, dates = list(dict.fromkeys(tickers)), list(dict.fromkeys(dates))
+    # A ticker or date given twice is one cell, run and settled once; "fpt" and
+    # "FPT.VN" are the same cell as "FPT", the code the memory log records.
+    tickers = list(dict.fromkeys(normalize_symbol(t) for t in tickers))
+    dates = list(dict.fromkeys(dates))
     cells = [(ticker, date) for ticker in tickers for date in dates]
     todo = [cell for cell in cells if cell not in done]
     result.skipped = len(cells) - len(todo)
@@ -199,10 +210,12 @@ def summarize(source: BacktestResult | str | Path) -> BacktestSummary:
     for rating in dict.fromkeys(e["rating"] for e, _ in resolved):
         alphas = [a for e, a in resolved if e["rating"] == rating]
         direction = _DIRECTION.get(rating, 0)
+        mean_alpha = sum(alphas) / len(alphas)
         by_rating[rating] = RatingScore(
             count=len(alphas),
             hit_rate=(sum(a * direction > 0 for a in alphas) / len(alphas)) if direction else None,
-            mean_alpha=sum(alphas) / len(alphas),
+            mean_alpha=mean_alpha,
+            mean_alpha_net=mean_alpha - vn_rules.round_trip_cost_pct() / 100 if direction > 0 else None,
         )
     unscored = sum(1 for e in entries if e["rating"] == RATING_REVIEW)
     # Report the window the outcomes were actually measured over, from the log.

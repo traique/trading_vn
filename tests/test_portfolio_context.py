@@ -188,14 +188,15 @@ def test_completed_run_clears_the_checkpoint_it_wrote(tmp_path, monkeypatch):
 
 
 @pytest.mark.unit
-def test_research_layer_sizes_against_a_standard_allocation():
-    """The research team is blind to the book, so its plan cannot promise
-    position-relative sizing: it sizes against a standard allocation instead."""
+def test_research_layer_adds_no_sizing_of_its_own():
+    """The research team is blind to the book and the quantitative engine sizes
+    the position, so the plan names what to monitor, never a size or a level."""
     from tradingagents.agents.schemas import ResearchPlan
 
     description = ResearchPlan.model_fields["strategic_actions"].description
-    assert "standard allocation" in description
-    assert "does not see the caller's holdings" in description
+    assert "monitor" in description
+    assert "Use only price levels already given" in description
+    assert "sizing" not in description
 
 
 @pytest.mark.unit

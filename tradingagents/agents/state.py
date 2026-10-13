@@ -44,9 +44,13 @@ class RiskDebateState(TypedDict):
 
 class AgentState(MessagesState):
     company_of_interest: Annotated[str, "Company that we are interested in trading"]
-    asset_type: Annotated[str, "Asset type under analysis such as stock or crypto"]
+    asset_type: Annotated[str, "Asset type under analysis; always 'stock' (Vietnamese equities)"]
     instrument_context: Annotated[str, "Deterministic ticker identity resolved at run start"]
     trade_date: Annotated[str, "The analysis date; data is served as of it"]
+
+    # quantitative engine: the system decision every agent explains and none may change
+    quant_decision: Annotated[dict, "The engine's action, levels and plan (QuantResult.to_state())"]
+    quant_report: Annotated[str, "The engine's report with every price level and its % distance"]
 
     # research step
     market_report: Annotated[str, "Report from the Market Analyst"]
@@ -67,7 +71,9 @@ class AgentState(MessagesState):
         RiskDebateState, "Current state of the debate on evaluating risk"
     ]
     final_trade_decision: Annotated[str, "Final decision from the Portfolio Manager"]
-    final_rating: Annotated[str, "The Portfolio Manager's 5-tier rating, or REVIEW when it has none"]
+    final_rating: Annotated[str, "The system action (BUY/HOLD/WATCH/SELL/NO_TRADE), or REVIEW when it has none"]
+    guard_notes: Annotated[str, "What the Output Guard dropped or flagged in the agents' text; empty when nothing"]
     past_context: Annotated[str, "Memory log context for the Portfolio Manager (same-ticker decisions + cross-ticker lessons), written by the Memory Log step"]
     memory_note: Annotated[str, "What the Memory Log step could not settle or read this run, for the report; empty when all went well"]
     portfolio_context: Annotated[str, "Caller-supplied holdings and cash, rendered at run start; empty when not provided"]
+    portfolio: Annotated[dict, "The caller's book as data (PortfolioContext.model_dump()); empty when not provided"]

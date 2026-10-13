@@ -156,7 +156,7 @@ def test_backtest_shows_each_cell_and_how_to_continue(runner, monkeypatch, tmp_p
 @pytest.mark.unit
 @pytest.mark.parametrize("args, analysts", [
     pytest.param(["--analysts", "sentiment,market"], ["market", "social"], id="named_as_in_analyze"),
-    pytest.param(["--asset-type", "crypto"], ["market", "social", "news"], id="crypto_default"),
+    pytest.param([], ["market", "social", "news", "fundamentals"], id="all_by_default"),
 ])
 def test_backtest_takes_its_analysts_as_an_analysis_does(runner, monkeypatch, tmp_path, args, analysts):
     swept = []
@@ -171,8 +171,8 @@ def test_backtest_takes_its_analysts_as_an_analysis_does(runner, monkeypatch, tm
 
 @pytest.mark.unit
 @pytest.mark.parametrize("args", [
-    pytest.param(["--analysts", "fundamentals", "--asset-type", "crypto"], id="unavailable_for_crypto"),
-    pytest.param(["--asset-type", "bond"], id="unknown_asset_type"),
+    pytest.param(["--analysts", "fundamentals,macro"], id="unknown_analyst"),
+    pytest.param(["--analysts", " , "], id="no_analyst"),
 ])
 def test_backtest_refuses_a_selection_before_the_sweep(runner, monkeypatch, args):
     monkeypatch.setattr(m, "run_backtest", lambda *a, **kw: pytest.fail("the sweep started"))

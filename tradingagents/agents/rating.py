@@ -1,11 +1,14 @@
-"""Shared 5-tier rating vocabulary and a deterministic heuristic parser.
+"""The five system actions and a deterministic parser for decision text.
 
-The same five-tier scale (Buy, Overweight, Hold, Underweight, Sell) is used by:
-- The Research Manager (investment plan recommendation)
-- The Portfolio Manager (final position decision; its free-text fallback is read here)
+The action scale (BUY, HOLD, WATCH, SELL, NO_TRADE) is the quantitative
+engine's (``tradingagents.quant.policy``), used by:
+- The Portfolio Manager's final decision, whose rating is the engine's action
 - The memory log (rating tag stored alongside each decision entry)
+- The backtest, which scores each action's direction
 
-Centralising it here avoids drift between those call sites.
+Centralising it here avoids drift between those call sites. The parser reads
+the English labels and their Vietnamese names (MUA, GIỮ, THEO DÕI, BÁN,
+ĐỨNG NGOÀI), and returns the canonical upper-case action.
 
 ``extract_rating`` returns ``None`` when no rating can be found, and every
 caller turns that into ``REVIEW`` rather than a tradeable position: a decision
@@ -18,10 +21,20 @@ from __future__ import annotations
 import re
 import unicodedata
 
-# Canonical, ordered 5-tier scale (most bullish to most bearish).
-RATINGS_5_TIER: tuple[str, ...] = (
-    "Buy", "Overweight", "Hold", "Underweight", "Sell",
-)
+# Canonical, ordered action scale (most bullish to most bearish).
+RATINGS: tuple[str, ...] = ("BUY", "HOLD", "WATCH", "NO_TRADE", "SELL")
+# Kept for callers that import the old name.
+RATINGS_5_TIER = RATINGS
+
+# Words a decision may use for each action, lower-cased. Two-word Vietnamese
+# names are matched by their first word, which is unambiguous on this scale.
+_ALIASES = {
+    "buy": "BUY", "mua": "BUY",
+    "hold": "HOLD", "giữ": "HOLD", "giu": "HOLD",
+    "watch": "WATCH", "theo": "WATCH",
+    "sell": "SELL", "bán": "SELL", "ban": "SELL",
+    "no_trade": "NO_TRADE", "notrade": "NO_TRADE", "đứng": "NO_TRADE", "dung": "NO_TRADE",
+}
 
 # Signal emitted when the model's decision has no recognizable rating. It is not
 # a tradeable position: it flags output that needs a human/re-run rather than
@@ -29,7 +42,7 @@ RATINGS_5_TIER: tuple[str, ...] = (
 # (e.g. ``PortfolioRating(signal)``) should guard with ``is_review`` first.
 RATING_REVIEW = "REVIEW"
 
-_RATING_SET = {r.lower() for r in RATINGS_5_TIER}
+_RATING_SET = set(_ALIASES)
 
 # Matches "Rating: X" / "rating - X" / "Rating — **X**" — tolerates markdown
 # bold wrappers and any dash or colon a model writes as the separator. "rating"
@@ -77,15 +90,15 @@ def extract_rating(text: str) -> str | None:
     m = _RATING_LINE_RE.match(first)
     opening = m if m and m.group("value").lower() in _RATING_SET else None
     if opening and not opening.group("item"):
-        return opening.group("value").capitalize()
+        return _ALIASES[opening.group("value").lower()]
 
-    own = [opening.group("value").capitalize()] if opening else []
+    own = [_ALIASES[opening.group("value").lower()]] if opening else []
     labels = []
     for line in lines:
         m = _RATING_LINE_RE.match(line)
         if m and not m.group("item") and m.group("value").lower() in _RATING_SET:
-            own.append(m.group("value").capitalize())
-        labels += [v.capitalize() for v in _RATING_LABEL_RE.findall(line) if v.lower() in _RATING_SET]
+            own.append(_ALIASES[m.group("value").lower()])
+        labels += [_ALIASES[v.lower()] for v in _RATING_LABEL_RE.findall(line) if v.lower() in _RATING_SET]
     # Without a label there is no call to read: a rating word in the prose may be
     # one the text argues against ("not a Sell"), and reading it reports a
     # direction nobody decided.
@@ -94,7 +107,7 @@ def extract_rating(text: str) -> str | None:
 
 
 def parse_rating(text: str, default: str = RATING_REVIEW) -> str:
-    """Extract a 5-tier rating, or ``REVIEW`` when the decision has none.
+    """Extract a system action, or ``REVIEW`` when the decision has none.
 
     For callers that need a string for every decision, such as the memory log's
     entry tag. The default is the review sentinel, never a tradeable rating.

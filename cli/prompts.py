@@ -12,7 +12,8 @@ from cli.models import AnalystType, AssetType
 from tradingagents.llm_clients.api_key_env import get_api_key_env
 from tradingagents.llm_clients.model_catalog import get_model_options
 
-TICKER_INPUT_EXAMPLES = "SPY, 0700.HK, BTC-USD"
+TICKER_INPUT_EXAMPLES = "FPT, HPG, VCB.VN, HOSE:SSI"
+DEFAULT_TICKER = "FPT"
 
 ANALYST_CHOICES = [
     ("Market Analyst", AnalystType.MARKET),
@@ -21,18 +22,15 @@ ANALYST_CHOICES = [
     ("Fundamentals Analyst", AnalystType.FUNDAMENTALS),
 ]
 
-CRYPTO_SUFFIXES = ("-USD", "-USDT", "-USDC", "-BTC", "-ETH")
-
-
 def is_valid_ticker_input(value: str) -> bool:
     """Whether a ticker entry is acceptable (charset + length).
 
-    Allows the characters Yahoo symbols use, including ``=`` for futures/forex
-    like ``GC=F`` and ``EURUSD=X`` (#980), and ``^`` for indices. Empty input is
-    allowed (it defaults to SPY downstream).
+    Allows Vietnamese codes with an optional exchange marker (``FPT.VN``,
+    ``HOSE:FPT``) and ``^``/``-`` for index aliases (``^VNINDEX``, ``VN-Index``).
+    Empty input is allowed (it defaults to FPT downstream).
     """
     v = value.strip()
-    return not v or (all(ch.isalnum() or ch in "._-^=" for ch in v) and len(v) <= 32)
+    return not v or (all(ch.isalnum() or ch in ".:_-^" for ch in v) and len(v) <= 32)
 
 
 def get_ticker() -> str:
@@ -46,7 +44,7 @@ def get_ticker() -> str:
         f"Enter ticker symbol (e.g. {TICKER_INPUT_EXAMPLES}):",
         validate=lambda x: (
             is_valid_ticker_input(x)
-            or "Please enter a valid ticker symbol, e.g. AAPL, 000404.SZ, 0700.HK, GC=F."
+            or f"Please enter a valid Vietnamese ticker, e.g. {TICKER_INPUT_EXAMPLES}."
         ),
         style=questionary.Style(
             [
@@ -60,7 +58,7 @@ def get_ticker() -> str:
         console.print("\n[red]No ticker symbol provided. Exiting...[/red]")
         exit(1)
 
-    return normalize_ticker_symbol(ticker) if ticker.strip() else "SPY"
+    return normalize_ticker_symbol(ticker) if ticker.strip() else DEFAULT_TICKER
 
 
 def parse_ticker(value: str) -> str:
@@ -100,11 +98,11 @@ def parse_analysts(value: str, asset_type: AssetType) -> list[AnalystType]:
 
 
 def normalize_ticker_symbol(ticker: str) -> str:
-    """Resolve user input to its canonical Yahoo symbol (single source of truth).
+    """Resolve user input to its canonical Vietnamese code (single source of truth).
 
     Delegates to the data layer's ``normalize_symbol`` so the symbol the CLI
     passes through the pipeline is exactly the one the data path will price
-    (e.g. ``BTCUSD`` -> ``BTC-USD``, ``XAUUSD`` -> ``GC=F``). Falls back to the
+    (e.g. ``fpt.vn`` -> ``FPT``, ``VN-Index`` -> ``VNINDEX``). Falls back to the
     plain upper-case if the data layer is unavailable.
     """
     try:
@@ -116,24 +114,15 @@ def normalize_ticker_symbol(ticker: str) -> str:
 
 
 def detect_asset_type(ticker: str) -> AssetType:
-    """Classify on the canonical symbol so e.g. BTCUSD and BTC-USDT both read as
-    crypto (#981/#982), matching what the data path will actually fetch."""
-    canonical = normalize_ticker_symbol(ticker)
-    if canonical.endswith(CRYPTO_SUFFIXES):
-        return AssetType.CRYPTO
+    """Every analysed instrument is a Vietnamese stock."""
     return AssetType.STOCK
 
 
 def filter_analysts_for_asset_type(
     analysts: list[AnalystType], asset_type: AssetType
 ) -> list[AnalystType]:
-    if asset_type != AssetType.CRYPTO:
-        return analysts
-    return [
-        analyst
-        for analyst in analysts
-        if analyst != AnalystType.FUNDAMENTALS
-    ]
+    """Every analyst serves a Vietnamese stock."""
+    return analysts
 
 
 def _matching_choice(options, default):
@@ -689,7 +678,8 @@ def ask_output_language(default=None) -> str:
     one entered last time is free text, which the menu cannot preselect.
     """
     choices = [
-        questionary.Choice("English (default)", "English"),
+        questionary.Choice("Tiếng Việt (mặc định)", "Vietnamese"),
+        questionary.Choice("English", "English"),
         questionary.Choice("Chinese (中文)", "Chinese"),
         questionary.Choice("Japanese (日本語)", "Japanese"),
         questionary.Choice("Korean (한국어)", "Korean"),
@@ -713,14 +703,14 @@ def ask_output_language(default=None) -> str:
         ]),
     ).ask()
 
-    # Output language has a sensible default, so a cancel falls back to English
+    # Output language has a sensible default, so a cancel falls back to Vietnamese
     # rather than exiting the run (unlike the required model/provider prompts).
     if choice is None:
-        return "English"
+        return "Vietnamese"
     if choice == "custom":
         return (questionary.text(
-            "Enter language name (e.g. Turkish, Vietnamese, Thai, Indonesian):",
+            "Enter language name (e.g. Turkish, Thai, Indonesian):",
             validate=lambda x: len(x.strip()) > 0 or "Please enter a language name.",
-        ).ask() or "").strip() or "English"
+        ).ask() or "").strip() or "Vietnamese"
 
     return choice

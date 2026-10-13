@@ -2,7 +2,7 @@
 
 - ``as_of`` / ``as_of_window`` clamp a date or window the model asks for to the
   trade date, so no tool reaches a vendor with a later one.
-- ``in_window`` trims dated items (news, StockTwits, Reddit) to the analysis
+- ``in_window`` trims dated items (news, disclosures, research notes) to the analysis
   window: timestamps normalized to UTC, the upper bound exclusive at midnight
   after ``end``, and an undated item kept only when the window reaches the
   present, since a backtest cannot prove it is not from the future (#1126, #1220).
@@ -46,9 +46,9 @@ def coverage_gap(
 ) -> str | None:
     """Placeholder for a window a feed did not fully observe, else None.
 
-    Yahoo news and the Reddit and StockTwits feeds return their latest items
-    whatever window is asked for, so "none found" over a window they never
-    observed would claim an absence nobody saw. A window is observed when
+    A feed that returns its latest items whatever window is asked for cannot
+    say "none found" over a window it never observed: that would claim an
+    absence nobody saw. A window is observed when
     coverage reaches its first day and it ends by today; an empty result is then
     a real absence and this returns None.
 
@@ -108,8 +108,8 @@ def as_of_window(start_date: str, end_date: str, trade_date: str) -> tuple[str, 
 def withhold_live_profile(as_of_date: str | None, label: str) -> str | None:
     """Notice to serve instead of a live-only company profile, or None to serve it.
 
-    Vendor "company overview" endpoints (yfinance ``Ticker.info``, Alpha Vantage
-    ``OVERVIEW``) carry no historical vintage — not even name, sector and
+    Vendor "company overview" endpoints (VCI ``company/details``) carry no
+    historical vintage — not even name, sector and
     industry, which move when a company renames or is reclassified — so serving
     one into a run dated in the past leaks post-decision information (#1300).
     Every fundamentals vendor withholds on this rule, so switching between them
@@ -127,16 +127,15 @@ def withhold_live_profile(as_of_date: str | None, label: str) -> str | None:
         f"rather than {as_of_date} (companies rename and get reclassified). "
         f"Serving them would put post-decision information into a {as_of_date} "
         f"analysis. Statements filed by {as_of_date} are served as filed where "
-        f"the filing date is known (SEC EDGAR, for US filers)."
+        f"the publication date is known."
     )
 
 
 def withhold_undisclosed_trades(as_of_date: str | None, label: str) -> str | None:
     """Notice to serve instead of insider trades with no filing date, or None to serve them.
 
-    A vendor that dates an insider trade by when it happened (Yahoo, Alpha
-    Vantage) cannot say when it became public: its Form 4 is filed up to two
-    business days later. A past run is told so rather than served trades that
+    A vendor that dates an insider trade by when it happened cannot say when
+    it became public: the disclosure is filed days later. A past run is told so rather than served trades that
     may not yet have been disclosed.
     """
     if not is_historical(as_of_date):
@@ -153,11 +152,10 @@ def withhold_undisclosed_trades(as_of_date: str | None, label: str) -> str | Non
 def withhold_undated_statements(as_of_date: str | None, label: str, title: str) -> str | None:
     """Notice to serve instead of a statement with no filing date, or None to serve it.
 
-    A vendor that dates a statement by the period it covers (Yahoo, Alpha
-    Vantage) cannot say when its figures became public: a company files weeks
-    after the period ends, so a run dated in that gap would read figures that
-    were not yet known. A past run is told so; SEC EDGAR, which dates every
-    filing, serves US filers as filed.
+    A vendor that dates a statement by the period it covers cannot say when its
+    figures became public: a company files weeks after the period ends, so a
+    run dated in that gap would read figures that were not yet known. A past
+    run is told so; VCI, which dates every statement, serves it as published.
     """
     if not is_historical(as_of_date):
         return None
@@ -166,5 +164,5 @@ def withhold_undated_statements(as_of_date: str | None, label: str, title: str) 
         f"# Point-in-time as of: {as_of_date}\n\n"
         f"{title} data is withheld for this date. This vendor dates a statement by "
         f"the period it covers and reports no filing date, so it cannot show which "
-        f"figures were public on {as_of_date}. SEC EDGAR serves US filers as filed."
+        f"figures were public on {as_of_date}."
     )

@@ -20,31 +20,40 @@ from pydantic import Field
 
 from tradingagents.agents import context, schemas
 from tradingagents.agents.analysts import sentiment_analyst
-from tradingagents.dataflows import router
-from tradingagents.dataflows.vendors.yahoo import market as yahoo_market, snapshot
+from tradingagents.dataflows import router, snapshot, symbols as symbols_module
 from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.graph import trading_graph
+from tradingagents.quant import engine
 
 TRADE_DATE = "2026-01-09"
 
 # Enough for every free-text reader: the PM's labelled rating and the trader's
 # closing proposal line.
-TEXT = "Report.\n\n**Rating**: Overweight\n\nFINAL TRANSACTION PROPOSAL: **BUY**"
+TEXT = "Report.\n\n**Rating**: BUY\n\nFINAL TRANSACTION PROPOSAL: **BUY**"
 
 STRUCTURED = {
     schemas.ResearchPlan: schemas.ResearchPlan(
-        recommendation=schemas.PortfolioRating.OVERWEIGHT, rationale="r", strategic_actions="a"),
-    schemas.TraderProposal: schemas.TraderProposal(action=schemas.TraderAction.BUY, reasoning="r"),
-    # The thesis quotes another party's rating; the decision is still the PM's own.
+        stance=schemas.Stance.AGREE, rationale="r", strategic_actions="a"),
+    schemas.TraderProposal: schemas.TraderProposal(reasoning="r", execution_notes="e"),
+    # The thesis quotes another party's rating; the decision is still the system's.
     schemas.PortfolioDecision: schemas.PortfolioDecision(
-        rating=schemas.PortfolioRating.OVERWEIGHT, executive_summary="s",
+        executive_summary="s", key_risks="k",
         investment_thesis="Street consensus rating: Buy (28 of 35 analysts)."),
     schemas.SentimentReport: schemas.SentimentReport(
         overall_band=schemas.SentimentBand.NEUTRAL, overall_score=5.0, confidence="low", narrative="n"),
 }
 
-ARGS = {"symbol": "NVDA", "ticker": "NVDA", "curr_date": TRADE_DATE, "start_date": "2026-01-02",
-        "end_date": TRADE_DATE, "indicator": "rsi", "topic": "Fed rate cut", "freq": "quarterly"}
+ARGS = {"symbol": "FPT", "ticker": "FPT", "curr_date": TRADE_DATE, "start_date": "2026-01-02",
+        "end_date": TRADE_DATE, "indicator": "rsi", "freq": "quarterly"}
+
+# The system decision the scripted run explains: a BUY with a full plan.
+DECISION = engine.QuantResult(
+    symbol="FPT", as_of_date=TRADE_DATE, last_bar_date=TRADE_DATE, price=100_000.0, exchange="HOSE",
+    action="BUY", confidence=0.8, setup_type="breakout", market_regime="risk_on", risk_level="medium",
+    data_quality="ok", reasons=["breakout"], stop_price=96_000.0, target_price=110_000.0, rr_ratio=2.0,
+    invalidation_reason="đóng cửa dưới 96.000", entry_low=99_000.0, entry_high=100_500.0,
+    position_size_pct=10.0, report="QUYẾT ĐỊNH HỆ THỐNG: BUY 100.000 VND",
+)
 
 
 class ScriptedModel(BaseChatModel):
@@ -113,9 +122,11 @@ def offline(monkeypatch, tmp_path):
     })
     monkeypatch.setattr(snapshot, "load_ohlcv",
                         lambda *a, **k: called.add("ohlcv") or prices.copy())
-    monkeypatch.setattr(sentiment_analyst, "fetch_stocktwits_messages", lambda *a, **k: "no posts")
-    monkeypatch.setattr(sentiment_analyst, "fetch_reddit_posts", lambda *a, **k: "no posts")
-    monkeypatch.setattr(yahoo_market.yf, "Ticker", lambda s: type("T", (), {"info": {"longName": "NVIDIA"}})())
+    for block in ("_keyword_block", "_research_block", "_foreign_block"):
+        monkeypatch.setattr(sentiment_analyst, block, lambda *a, **k: "no data")
+    monkeypatch.setattr(symbols_module, "listing_entry",
+                        lambda s: {"symbol": "FPT", "board": "HSX", "organName": "Công ty Cổ phần FPT"})
+    monkeypatch.setattr(engine, "analyze", lambda *a, **k: called.add("quant") or copy.deepcopy(DECISION))
     context._identity.cache_clear()
     return called
 
@@ -133,18 +144,18 @@ def _graph(tmp_path, monkeypatch, model, debug=False, **config):
 def test_a_full_run_reaches_a_logged_decision(tmp_path, monkeypatch, offline, structured):
     graph = _graph(tmp_path, monkeypatch, ScriptedModel(structured=structured))
 
-    state, signal = graph.propagate("NVDA", TRADE_DATE)
+    state, signal = graph.propagate("FPT", TRADE_DATE)
 
-    assert signal == state["final_rating"] == "Overweight"
+    assert signal == state["final_rating"] == "BUY"
     for key in ("market_report", "sentiment_report", "news_report", "fundamentals_report",
                 "investment_plan", "trader_investment_plan", "final_trade_decision"):
         assert state[key].strip(), key
     tool_methods = {"get_stock_data", "get_indicators", "get_news", "get_global_news",
-                    "get_macro_indicators", "get_prediction_markets", "get_fundamentals",
+                    "get_market_context", "get_fundamentals",
                     "get_balance_sheet", "get_cashflow", "get_income_statement",
-                    "get_insider_transactions", "ohlcv"}
+                    "get_corporate_events", "ohlcv", "quant"}
     assert offline == tool_methods
-    assert [e["rating"] for e in graph.memory_log.load_entries()] == ["Overweight"]
+    assert [e["rating"] for e in graph.memory_log.load_entries()] == ["BUY"]
 
 
 @pytest.mark.unit
@@ -152,15 +163,15 @@ def test_an_interrupted_run_resumes_from_its_checkpoint(tmp_path, monkeypatch, o
     model = ScriptedModel(fail_at=12)            # past the analysts, before the decision
     graph = _graph(tmp_path, monkeypatch, model, checkpoint_enabled=True)
     with pytest.raises(RuntimeError, match="provider unavailable"):
-        graph.propagate("NVDA", TRADE_DATE)
+        graph.propagate("FPT", TRADE_DATE)
     calls_before = len(model.calls)
 
-    _, signal = graph.propagate("NVDA", TRADE_DATE)
+    _, signal = graph.propagate("FPT", TRADE_DATE)
 
-    assert signal == "Overweight"
+    assert signal == "BUY"
     resumed_calls = len(model.calls) - calls_before
     full_run = ScriptedModel()
-    _graph(tmp_path / "fresh", monkeypatch, full_run).propagate("NVDA", TRADE_DATE)
+    _graph(tmp_path / "fresh", monkeypatch, full_run).propagate("FPT", TRADE_DATE)
     # The resumed run makes only the calls the interrupted one had not completed.
     assert resumed_calls == len(full_run.calls) - (model.fail_at - 1)
 
@@ -171,11 +182,11 @@ def test_a_graph_reused_across_runs_keeps_no_run_state(tmp_path, monkeypatch, of
     state would grow without bound."""
     graph = _graph(tmp_path, monkeypatch, ScriptedModel())
     for trade_date in ("2026-01-08", TRADE_DATE):
-        graph.propagate("NVDA", trade_date)
+        graph.propagate("FPT", trade_date)
 
     held = [v for v in vars(graph).values() if isinstance(v, dict) and TRADE_DATE in v]
     assert held == []
-    assert len(list(tmp_path.glob("results/NVDA/TradingAgentsStrategy_logs/*.json"))) == 2
+    assert len(list(tmp_path.glob("results/FPT/TradingAgentsStrategy_logs/*.json"))) == 2
 
 
 @pytest.mark.unit
@@ -184,7 +195,7 @@ def test_the_analysts_run_at_the_same_time(tmp_path, monkeypatch, offline):
     graph = _graph(tmp_path, monkeypatch, model)
 
     assert not [n for n in graph.graph.get_graph().nodes if n.startswith("Msg Clear")]
-    graph.propagate("NVDA", TRADE_DATE)
+    graph.propagate("FPT", TRADE_DATE)
 
     assert len(model.threads) > 1
 
@@ -194,9 +205,9 @@ def test_a_debug_run_prints_the_analysts_work_and_reaches_the_same_decision(tmp_
     """Debug mode streams the analysts' own graphs, so their tool calls still print."""
     graph = _graph(tmp_path, monkeypatch, ScriptedModel(), debug=True)
 
-    state, signal = graph.propagate("NVDA", TRADE_DATE)
+    state, signal = graph.propagate("FPT", TRADE_DATE)
 
-    assert signal == "Overweight"
+    assert signal == "BUY"
     assert state["market_report"].strip() and state["fundamentals_report"].strip()
     printed = capsys.readouterr().out
     assert "get_stock_data" in printed and "get_balance_sheet" in printed
@@ -209,7 +220,7 @@ def test_each_report_streams_as_soon_as_its_analyst_files_it(tmp_path, monkeypat
     graph = _graph(tmp_path, monkeypatch, ScriptedModel())
     reports = ("market_report", "sentiment_report", "news_report", "fundamentals_report")
 
-    first = next(state for _, state in graph.stream_run(graph.create_run_state("NVDA", TRADE_DATE),
+    first = next(state for _, state in graph.stream_run(graph.create_run_state("FPT", TRADE_DATE),
                                                         **graph.propagator.get_graph_args())
                  if state and any(state.get(k) for k in reports))
 
@@ -225,11 +236,11 @@ def test_a_streamed_run_reads_its_own_graph_config(tmp_path, monkeypatch, offlin
     graph = _graph(tmp_path, monkeypatch, ScriptedModel(), output_language="French")
     set_config({"output_language": "German"})
     seen = []
-    monkeypatch.setitem(router.VENDOR_METHODS["get_stock_data"], "yfinance",
+    monkeypatch.setitem(router.VENDOR_METHODS["get_stock_data"], "dnse",
                         lambda *a, **k: seen.append(get_config()["output_language"]) or "prices")
 
     between = [get_config()["output_language"]
-               for _ in graph.stream_run(graph.create_run_state("NVDA", TRADE_DATE), **graph.propagator.get_graph_args())]
+               for _ in graph.stream_run(graph.create_run_state("FPT", TRADE_DATE), **graph.propagator.get_graph_args())]
 
     assert seen and set(seen) == {"French"}
     assert set(between) == {"German"}
@@ -259,12 +270,12 @@ def test_an_analyst_that_keeps_calling_tools_writes_its_report_at_the_limit(tmp_
     model = LoopingModel(structured=True)
     graph = _graph(tmp_path, monkeypatch, model, max_tool_rounds=3)
 
-    final_state, rating = graph.propagate("NVDA", TRADE_DATE)
+    final_state, rating = graph.propagate("FPT", TRADE_DATE)
 
     assert len(model.tool_turns) == 3 * 3   # three tool-using analysts, three rounds each
     for key in ("market_report", "news_report", "fundamentals_report"):
         assert final_state[key] == TEXT
-    assert rating == "Overweight"
+    assert rating == "BUY"
 
 
 @pytest.mark.unit
@@ -274,7 +285,7 @@ def test_the_last_turn_is_offered_no_tools_and_reads_its_tool_results_as_text(tm
     model = LoopingModel(structured=True)
     graph = _graph(tmp_path, monkeypatch, model, max_tool_rounds=2)
 
-    graph.propagate("NVDA", TRADE_DATE)
+    graph.propagate("FPT", TRADE_DATE)
 
     wrap_ups = [h for h in model.last_turns if isinstance(h[-1], HumanMessage) and "tool round" in h[-1].content]
     assert len(wrap_ups) == 3
@@ -312,11 +323,11 @@ def test_past_decisions_settle_alongside_the_analysts(tmp_path, monkeypatch, off
 
     model = TimedModel()
     graph = _graph(tmp_path, monkeypatch, model)
-    graph.memory_log.store_decision("NVDA", "2026-01-02", "Rating: Buy\n\nBuy NVDA.")
+    graph.memory_log.store_decision("FPT", "2026-01-02", "Rating: Buy\n\nBuy FPT.")
     closes = pd.Series([100.0 + i for i in range(10)], index=pd.bdate_range("2026-01-02", periods=10))
     monkeypatch.setattr(settlement, "get_closes", lambda *a, **k: closes)
 
-    graph.propagate("NVDA", TRADE_DATE)
+    graph.propagate("FPT", TRADE_DATE)
 
     reflections = [c for c in model.seen if c[0] == "Memory Log"]
     assert len(reflections) == 1                # settled once, inside the run
@@ -324,7 +335,7 @@ def test_past_decisions_settle_alongside_the_analysts(tmp_path, monkeypatch, off
     assert reflections[0][2] < max(c[3] for c in analyst_turns), "settled before the analysts, not alongside"
     settled = next(e for e in graph.memory_log.load_entries() if e["date"] == "2026-01-02")
     assert not settled["pending"]
-    lessons = graph.memory_log.get_past_context("NVDA", as_of=TRADE_DATE)
+    lessons = graph.memory_log.get_past_context("FPT", as_of=TRADE_DATE)
     assert lessons
     pm_prompt = next(c[1] for c in model.seen if c[0] == "Portfolio Manager")
     assert lessons in pm_prompt
@@ -341,11 +352,11 @@ def test_a_settlement_failure_is_noted_and_the_run_goes_on(tmp_path, monkeypatch
         raise OSError("memory log is locked")
 
     monkeypatch.setattr(graph, "settle_all_pending", locked)
-    final_state, rating = graph.propagate("NVDA", TRADE_DATE)
+    final_state, rating = graph.propagate("FPT", TRADE_DATE)
 
-    assert rating == "Overweight"
+    assert rating == "BUY"
     assert "could not be settled" in final_state["memory_note"]
-    report = write_report_tree(final_state, "NVDA", tmp_path / "report").read_text()
+    report = write_report_tree(final_state, "FPT", tmp_path / "report").read_text(encoding="utf-8")
     assert "Memory log: Past decisions could not be settled" in report
 
 
@@ -355,13 +366,13 @@ def test_the_run_settles_other_tickers_due_decisions_too(tmp_path, monkeypatch, 
     from tradingagents.memory import settlement
 
     graph = _graph(tmp_path, monkeypatch, ScriptedModel(structured=True))
-    graph.memory_log.store_decision("MSFT", "2026-01-02", "Rating: Buy\n\nBuy MSFT.")
+    graph.memory_log.store_decision("HPG", "2026-01-02", "Rating: Buy\n\nBuy HPG.")
     closes = pd.Series([100.0 + i for i in range(10)], index=pd.bdate_range("2026-01-02", periods=10))
     monkeypatch.setattr(settlement, "get_closes", lambda *a, **k: closes)
 
-    graph.propagate("NVDA", TRADE_DATE)
+    graph.propagate("FPT", TRADE_DATE)
 
-    msft = next(e for e in graph.memory_log.load_entries() if e["ticker"] == "MSFT")
+    msft = next(e for e in graph.memory_log.load_entries() if e["ticker"] == "HPG")
     assert not msft["pending"]
 
 
@@ -372,14 +383,14 @@ def test_the_memory_step_reads_lessons_as_of_the_trade_date_and_settles_once(tmp
     from tradingagents.memory import settlement
 
     graph = _graph(tmp_path, monkeypatch, ScriptedModel(structured=True))
-    graph.memory_log.store_decision("NVDA", "2026-01-02", "Rating: Buy\n\nBuy NVDA.")
+    graph.memory_log.store_decision("FPT", "2026-01-02", "Rating: Buy\n\nBuy FPT.")
     closes = pd.Series([100.0 + i for i in range(10)], index=pd.bdate_range("2026-01-02", periods=10))
     monkeypatch.setattr(settlement, "get_closes", lambda *a, **k: closes)
     asked = []
     real = graph.memory_log.get_past_context
     monkeypatch.setattr(graph.memory_log, "get_past_context",
                         lambda ticker, as_of=None, **k: asked.append(as_of) or real(ticker, as_of=as_of, **k))
-    state = {"company_of_interest": "NVDA", "trade_date": "2026-01-20"}
+    state = {"company_of_interest": "FPT", "trade_date": "2026-01-20"}
 
     graph._memory_step(state)
     log_after_first = (tmp_path / "log.md").read_text()

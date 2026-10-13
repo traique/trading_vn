@@ -1,3 +1,4 @@
+from tradingagents.agents import vn_context
 from tradingagents.agents.context import (
     get_instrument_context_from_state,
     get_language_instruction,
@@ -20,15 +21,10 @@ def create_bull_researcher(llm):
         news_report = report_or_absent(state["news_report"], "news")
         fundamentals_report = report_or_absent(state["fundamentals_report"], "fundamentals")
         instrument_context = get_instrument_context_from_state(state)
-        asset_type = state.get("asset_type", "stock")
-        target_label = "stock" if asset_type == "stock" else "asset"
-        fundamentals_label = (
-            "Company fundamentals report"
-            if asset_type == "stock"
-            else "Asset fundamentals report (may be unavailable for crypto)"
-        )
+        quant_block = vn_context.quant_block(state)
+        action = vn_context.action_of(state)
 
-        prompt = f"""You are a Bull Analyst advocating for investing in the {target_label}. Your task is to build a strong, evidence-based case emphasizing growth potential, competitive advantages, and positive market indicators. Leverage the provided research and data to address concerns and counter bearish arguments effectively.
+        prompt = f"""You are the Bull Analyst in an internal debate on a Vietnamese stock. Build the strongest upside case the data can defend: growth potential, competitive advantages, and positive market indicators. The quantitative system has already fixed the action ({action}); you do not need to agree with it, but you cannot change it. If the action is not BUY, frame your case as "the reversal scenario to watch", not as advice to buy.
 
 Key points to focus on:
 - Growth Potential: Highlight the company's market opportunities, revenue projections, and scalability.
@@ -39,13 +35,19 @@ Key points to focus on:
 
 Resources available:
 {instrument_context}
+{quant_block}
+
 Market research report: {market_research_report}
-Social media sentiment report: {sentiment_report}
-Latest world affairs news: {news_report}
-{fundamentals_label}: {fundamentals_report}
+Sentiment report: {sentiment_report}
+News and market backdrop report: {news_report}
+Company fundamentals report: {fundamentals_report}
 Conversation history of the debate: {history}
 Last bear argument: {current_response}
 Use this information to deliver a compelling bull argument, refute the bear's concerns, and engage in a dynamic debate that demonstrates the strengths of the bull position.
+
+{vn_context.NO_INVENT_RULE}
+
+{vn_context.GROUNDING_RULES}
 """ + get_language_instruction()
 
         response = llm.invoke(prompt)

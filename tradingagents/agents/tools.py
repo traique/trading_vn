@@ -12,7 +12,7 @@ from langgraph.prebuilt import InjectedState
 from tradingagents.dataflows.date_window import as_of, as_of_window
 from tradingagents.dataflows.errors import NoMarketDataError, VendorUnavailableError
 from tradingagents.dataflows.router import no_data_available, route_to_vendor, vendor_unavailable
-from tradingagents.dataflows.vendors.yahoo.snapshot import build_verified_market_snapshot
+from tradingagents.dataflows.snapshot import build_verified_market_snapshot
 
 
 @tool
@@ -23,8 +23,9 @@ def get_stock_data(
     trade_date: Annotated[str, InjectedState("trade_date")] = "",
 ) -> str:
     """
-    Retrieve stock price data (OHLCV) for the instrument under analysis.
-    Uses the configured core_stock_apis vendor.
+    Retrieve daily OHLCV for the Vietnamese stock under analysis (HOSE/HNX/UPCoM).
+    Prices are in VND, adjusted for dividends and bonus issues; only closed
+    sessions are returned. Uses the configured core_stock_apis vendors (DNSE, VCI).
     Args:
         start_date (str): Start date in yyyy-mm-dd format
         end_date (str): End date in yyyy-mm-dd format
@@ -47,8 +48,9 @@ def get_indicators(
     trade_date: Annotated[str, InjectedState("trade_date")] = "",
 ) -> str:
     """
-    Retrieve a single technical indicator for the instrument under analysis.
-    Uses the configured technical_indicators vendor.
+    Retrieve a single technical indicator for the stock under analysis, computed
+    on closed sessions only. Supported: close_50_sma, close_200_sma, close_10_ema,
+    macd, macds, macdh, rsi, boll, boll_ub, boll_lb, atr, vwma, mfi.
     Args:
         indicator (str): A single technical indicator name, e.g. 'rsi', 'macd'. Call this tool once per indicator.
         curr_date (str): The current trading date you are trading on, YYYY-mm-dd
@@ -101,8 +103,9 @@ def get_fundamentals(
     trade_date: Annotated[str, InjectedState("trade_date")] = "",
 ) -> str:
     """
-    Retrieve comprehensive fundamental data for the instrument under analysis.
-    Uses the configured fundamental_data vendor.
+    Retrieve valuation (P/E, P/B, EV/EBITDA), profitability, leverage, growth and
+    the sector valuation benchmark of the Vietnamese company under analysis, from
+    reports published on or before the trade date (VCI).
     Args:
         curr_date (str): Current date you are trading at, yyyy-mm-dd
     Returns:
@@ -119,8 +122,8 @@ def get_balance_sheet(
     trade_date: Annotated[str, InjectedState("trade_date")] = "",
 ) -> str:
     """
-    Retrieve balance sheet data for the instrument under analysis.
-    Uses the configured fundamental_data vendor.
+    Retrieve the balance sheet of the Vietnamese company under analysis, in billions of VND,
+    for the latest periods published on or before the trade date (VCI).
     Args:
         freq (str): Reporting frequency: annual/quarterly (default quarterly)
         curr_date (str): Current date you are trading at, yyyy-mm-dd
@@ -138,8 +141,8 @@ def get_cashflow(
     trade_date: Annotated[str, InjectedState("trade_date")] = "",
 ) -> str:
     """
-    Retrieve cash flow statement data for the instrument under analysis.
-    Uses the configured fundamental_data vendor.
+    Retrieve the cash flow statement of the Vietnamese company under analysis, in billions of VND,
+    for the latest periods published on or before the trade date (VCI).
     Args:
         freq (str): Reporting frequency: annual/quarterly (default quarterly)
         curr_date (str): Current date you are trading at, yyyy-mm-dd
@@ -157,8 +160,8 @@ def get_income_statement(
     trade_date: Annotated[str, InjectedState("trade_date")] = "",
 ) -> str:
     """
-    Retrieve income statement data for the instrument under analysis.
-    Uses the configured fundamental_data vendor.
+    Retrieve the income statement of the Vietnamese company under analysis, in billions of VND,
+    for the latest periods published on or before the trade date (VCI).
     Args:
         freq (str): Reporting frequency: annual/quarterly (default quarterly)
         curr_date (str): Current date you are trading at, yyyy-mm-dd
@@ -176,8 +179,9 @@ def get_news(
     trade_date: Annotated[str, InjectedState("trade_date")] = "",
 ) -> str:
     """
-    Retrieve news data for the instrument under analysis.
-    Uses the configured news_data vendor.
+    Retrieve company news for the stock under analysis: company disclosures (VCI),
+    broker research notes (CafeF) and Vietnamese press (Google News). Items marked
+    ✅ are about this company; ⚠️ items are sector/market news only.
     Args:
         start_date (str): Start date in yyyy-mm-dd format
         end_date (str): End date in yyyy-mm-dd format
@@ -199,8 +203,8 @@ def get_global_news(
     trade_date: Annotated[str, InjectedState("trade_date")] = "",
 ) -> str:
     """
-    Retrieve global news data.
-    Uses the configured news_data vendor. Defaults for look_back_days and
+    Retrieve Vietnamese macro and market headlines (SBV policy, USD/VND, CPI, FDI,
+    exports, foreign flows, market upgrade). Defaults for look_back_days and
     limit come from DEFAULT_CONFIG (global_news_lookback_days,
     global_news_article_limit); pass explicit values to override.
 
@@ -216,76 +220,33 @@ def get_global_news(
 
 
 @tool
-def get_insider_transactions(
+def get_corporate_events(
     ticker: Annotated[str, InjectedState("company_of_interest")],
     trade_date: Annotated[str, InjectedState("trade_date")] = "",
 ) -> str:
     """
-    Retrieve insider transaction information about a company.
-    Uses the configured news_data vendor.
+    Retrieve the company's corporate events of the past year that were public by
+    the trade date: cash dividends and share issues (with ex-rights dates),
+    insider and major-shareholder deal registrations/results, and shareholder
+    meetings (VCI).
     Returns:
-        str: A report of insider transaction data
+        str: A report of corporate events grouped by type
     """
-    return route_to_vendor("get_insider_transactions", ticker, trade_date or None)
+    return route_to_vendor("get_corporate_events", ticker, trade_date or None)
 
 
 @tool
-def get_macro_indicators(
-    indicator: Annotated[
-        str,
-        "Macro indicator: a friendly alias such as 'cpi', 'core_pce', "
-        "'unemployment', 'fed_funds_rate', '10y_treasury', 'yield_curve', "
-        "'real_gdp', 'vix', euro-area aliases such as 'ecb_deposit_rate', "
-        "'euro_hicp', 'euro_core_hicp', 'euro_real_gdp', 'germany_10y', "
-        "'france_10y', 'eur_usd', or a raw FRED series ID such as 'CPIAUCSL'.",
-    ],
-    curr_date: Annotated[str, "Current date in yyyy-mm-dd format; the end of the window"],
-    look_back_days: Annotated[
-        int | None, "Trailing window length in days; omit for a 1-year window"
-    ] = None,
+def get_market_context(
+    ticker: Annotated[str, InjectedState("company_of_interest")],
+    curr_date: Annotated[str, "Current date in yyyy-mm-dd format"],
     trade_date: Annotated[str, InjectedState("trade_date")] = "",
 ) -> str:
     """
-    Retrieve a macroeconomic indicator time series from FRED (Federal Reserve
-    Economic Data): policy rates, Treasury yields, inflation, labor, and growth,
-    for the US and, through FRED's mirrored series, the euro area.
-    Returns the series title, units, frequency, the latest value, the change
-    over the window, and a recent observation table. Uses the configured
-    macro_data vendor.
-
-    Args:
-        indicator (str): Friendly alias or raw FRED series ID
-        curr_date (str): Current date in yyyy-mm-dd format
-        look_back_days (int): Trailing window length; omit for a 1-year window
-
+    Retrieve the Vietnamese market backdrop: VN-Index, VN30, HNX and UPCoM
+    performance (1 week / 1 month / 3 months), the VNINDEX regime (risk-on /
+    neutral / risk-off from trend, ADX and distribution days) and how the
+    stock's sector is performing versus VNINDEX. Closed sessions only.
     Returns:
-        str: A formatted markdown report of the macro series
+        str: A formatted market context report
     """
-    return route_to_vendor("get_macro_indicators", indicator, as_of(curr_date, trade_date), look_back_days)
-
-
-@tool
-def get_prediction_markets(
-    topic: Annotated[
-        str,
-        "Event topic/keyword, e.g. 'Fed rate cut', 'recession 2026', "
-        "'US election', or a sector/company event.",
-    ],
-    limit: Annotated[int | None, "Max markets to return; omit for a default of 6"] = None,
-    trade_date: Annotated[str, InjectedState("trade_date")] = "",
-) -> str:
-    """
-    Retrieve live, market-implied probabilities for forward-looking events from
-    prediction markets (Polymarket): Fed decisions, recession, elections,
-    geopolitics, crypto. Returns the most-traded open markets matching the
-    topic, each with its implied probability, traded volume, resolution date,
-    and recent move. Uses the configured prediction_markets vendor.
-
-    Args:
-        topic (str): Event keyword(s) to search
-        limit (int): Max markets to return; omit for a default of 6
-
-    Returns:
-        str: A formatted markdown report of matching prediction markets
-    """
-    return route_to_vendor("get_prediction_markets", topic, limit, trade_date or None)
+    return route_to_vendor("get_market_context", ticker, as_of(curr_date, trade_date))

@@ -6,9 +6,10 @@ opening a new one. Three states are distinct and must stay so: a position, a
 flat book, and no context at all, since treating "not provided" as "flat" would
 invent a fact about the caller's account.
 
-Broker-neutral by construction: quantities are generic units and the currency is
-whatever label the caller passes, so nothing here implies a venue or an
-execution path.
+Broker-neutral by construction: quantities are shares and prices are VND unless
+the caller labels another currency, so nothing here implies a broker or an
+execution path. Tickers match by their canonical code, so ``FPT.VN`` in the
+book is the ``FPT`` under analysis.
 """
 
 from __future__ import annotations
@@ -21,8 +22,8 @@ from pydantic import BaseModel, Field, ValidationError
 
 
 class Position(BaseModel):
-    ticker: str = Field(description="Instrument symbol, e.g. AAPL")
-    quantity: float = Field(description="Signed units held; negative is short")
+    ticker: str = Field(description="Vietnamese stock code, e.g. FPT")
+    quantity: float = Field(description="Shares held (Vietnamese shares cannot be held short)")
     average_price: float | None = Field(default=None, description="Average entry price per unit")
 
 
@@ -32,7 +33,10 @@ class PortfolioContext(BaseModel):
     positions: list[Position] = Field(default_factory=list)
 
     def position_in(self, ticker: str) -> Position | None:
-        return next((p for p in self.positions if p.ticker.upper() == ticker.strip().upper()), None)
+        from tradingagents.dataflows.symbols import normalize_symbol
+
+        code = normalize_symbol(ticker)
+        return next((p for p in self.positions if normalize_symbol(p.ticker) == code), None)
 
     def render(self, ticker: str) -> str:
         """The portfolio block for the decision agents, led by the analyzed instrument."""

@@ -12,5 +12,5 @@ config = DEFAULT_CONFIG.copy()
 ta = TradingAgentsGraph(debug=True, config=config)
 
 # forward propagate
-_, decision = ta.propagate("NVDA", "2026-09-01")
+_, decision = ta.propagate("FPT", "2026-10-13")
 print(decision)

@@ -19,7 +19,7 @@ def _state(**overrides):
     state = {"trade_date": "2026-09-26",
              "market_report": "# Market view\n\nPrice | Level\n--- | ---\nClose | 181.2\n",
              "news_report": "News text.",
-             "final_trade_decision": "**Rating**: Overweight\n\nAdd on weakness."}
+             "final_trade_decision": "**Rating**: WATCH\n\nWait for a breakout."}
     state.update(overrides)
     return state
 
@@ -37,7 +37,7 @@ def test_the_html_page_is_written_unless_declined(tmp_path):
     assert (tmp_path / "default" / "complete_report.html").exists()
 
     page = _html(tmp_path / "html")
-    assert "<h1" in page and "NVDA" in page and "Overweight" in page and "2026-09-26" in page
+    assert "<h1" in page and "NVDA" in page and "WATCH" in page and "2026-09-26" in page
     assert '<table>' in page and "181.2" in page
 
 
@@ -135,7 +135,7 @@ def test_the_sections_stay_within_reach(tmp_path):
 def test_the_page_heading_is_the_ticker_and_its_rating(tmp_path):
     page = _html(tmp_path)
     heading = re.search(r"<h1>(.*?)</h1>", page).group(1)
-    assert re.sub(r"<[^>]+>", "", heading).split() == ["NVDA", "Overweight"]
+    assert re.sub(r"<[^>]+>", "", heading).split() == ["NVDA", "WATCH"]
 
 
 @pytest.mark.unit

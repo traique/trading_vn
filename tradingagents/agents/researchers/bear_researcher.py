@@ -1,3 +1,4 @@
+from tradingagents.agents import vn_context
 from tradingagents.agents.context import (
     get_instrument_context_from_state,
     get_language_instruction,
@@ -20,15 +21,10 @@ def create_bear_researcher(llm):
         news_report = report_or_absent(state["news_report"], "news")
         fundamentals_report = report_or_absent(state["fundamentals_report"], "fundamentals")
         instrument_context = get_instrument_context_from_state(state)
-        asset_type = state.get("asset_type", "stock")
-        target_label = "stock" if asset_type == "stock" else "asset"
-        fundamentals_label = (
-            "Company fundamentals report"
-            if asset_type == "stock"
-            else "Asset fundamentals report (may be unavailable for crypto)"
-        )
+        quant_block = vn_context.quant_block(state)
+        action = vn_context.action_of(state)
 
-        prompt = f"""You are a Bear Analyst making the case against investing in the {target_label}. Your goal is to present a well-reasoned argument emphasizing risks, challenges, and negative indicators. Leverage the provided research and data to highlight potential downsides and counter bullish arguments effectively.
+        prompt = f"""You are the Bear Analyst in an internal debate on a Vietnamese stock. Make the strongest case against the stock: risks, weaknesses, and negative indicators, and rebut the bull's points directly. The quantitative system has already fixed the action ({action}); you may argue it is too optimistic, but you cannot change it. Remember there is no short selling in Vietnam: a bearish view means "do not buy" or "exit a holding".
 
 Key points to focus on:
 
@@ -41,13 +37,19 @@ Key points to focus on:
 Resources available:
 
 {instrument_context}
+{quant_block}
+
 Market research report: {market_research_report}
-Social media sentiment report: {sentiment_report}
-Latest world affairs news: {news_report}
-{fundamentals_label}: {fundamentals_report}
+Sentiment report: {sentiment_report}
+News and market backdrop report: {news_report}
+Company fundamentals report: {fundamentals_report}
 Conversation history of the debate: {history}
 Last bull argument: {current_response}
-Use this information to deliver a compelling bear argument, refute the bull's claims, and engage in a dynamic debate that demonstrates the risks and weaknesses of investing in the {target_label}.
+Use this information to deliver a compelling bear argument, refute the bull's claims, and engage in a dynamic debate that demonstrates the risks and weaknesses of investing in the stock.
+
+{vn_context.NO_INVENT_RULE}
+
+{vn_context.GROUNDING_RULES}
 """ + get_language_instruction()
 
         response = llm.invoke(prompt)

@@ -157,8 +157,8 @@ def _prompt_selections(prefs, flags):
         console.print(
             create_question_box(
                 "Step 1: Ticker Symbol",
-                "Enter the ticker, with exchange suffix when needed (e.g. SPY, 0700.HK, BTC-USD)",
-                "SPY",
+                "Enter a Vietnamese stock code (e.g. FPT, HPG, VCB.VN, HOSE:SSI)",
+                "FPT",
             )
         )
         selected_ticker = get_ticker()

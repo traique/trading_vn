@@ -1,20 +1,21 @@
-"""Sentiment analyst: one sentiment report from three sources.
+"""Sentiment analyst: one sentiment report from Vietnamese news flow.
 
 The node fetches its sources before calling the model and puts them in the
 prompt, so the model reports on data it was given rather than inventing posts:
 
-  1. News headlines: Yahoo Finance
-  2. StockTwits messages: the cashtag stream, with Bullish/Bearish tags
-  3. Reddit posts: r/wallstreetbets, r/stocks, r/investing, or crypto communities for a crypto pair
+  1. Company news of the past 7 days: disclosures (VCI), broker research
+     (CafeF) and the Vietnamese press (Google News), each item tagged ✅ when it
+     is about the company and ⚠️ when it is sector or market news.
+  2. A deterministic keyword score of those headlines (port of lananh-main's
+     lexicon), so the model weighs its read against a fixed baseline.
+  3. Broker research notes on the ticker over the past 90 days.
+  4. Foreign ownership and remaining room, for a run dated today only (VCI has
+     no history of it).
 
-Each source is trimmed to the analysis window. With a TypeSafe key, the social
-posts are screened by Jev first (see post_screen). These feeds serve recent items
-and are not archived, so a historical run's sentiment inputs are not
-point-in-time.
-
-The report is a SentimentReport through structured output where the provider
-supports it and free text otherwise, so the band, score and confidence header
-reads the same across providers.
+Every source is dated and windowed to the run date, so a historical run reads
+only what was public then. The report is a SentimentReport through structured
+output where the provider supports it and free text otherwise, so the band,
+score and confidence header reads the same across providers.
 """
 
 from datetime import datetime, timedelta
@@ -22,8 +23,8 @@ from datetime import datetime, timedelta
 from langchain_core.messages import AIMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
+from tradingagents.agents import vn_context
 from tradingagents.agents.context import get_instrument_context_from_state, get_language_instruction
-from tradingagents.agents.post_screen import jev_screen
 from tradingagents.agents.schemas import SentimentReport, render_sentiment_report
 from tradingagents.agents.structured import (
     NO_EXTERNAL_TOOLS,
@@ -31,58 +32,82 @@ from tradingagents.agents.structured import (
     invoke_structured_or_freetext,
 )
 from tradingagents.agents.tools import get_news
-from tradingagents.dataflows.vendors.reddit import (
-    CRYPTO_SUBREDDITS,
-    DEFAULT_SUBREDDITS,
-    fetch_reddit_posts,
-    subreddits_for,
+from tradingagents.dataflows.news import (
+    collect_company_news,
+    get_broker_research,
+    get_foreign_ownership,
+    sentiment_score,
 )
-from tradingagents.dataflows.vendors.stocktwits import fetch_stocktwits_messages
+from tradingagents.dataflows.symbols import normalize_symbol
+from tradingagents.quant import report_format as rfmt
 
 
-def _seven_days_back(trade_date: str) -> str:
-    return (datetime.strptime(trade_date, "%Y-%m-%d") - timedelta(days=7)).strftime("%Y-%m-%d")
+def _days_back(trade_date: str, days: int) -> str:
+    return (datetime.strptime(trade_date, "%Y-%m-%d") - timedelta(days=days)).strftime("%Y-%m-%d")
+
+
+def _keyword_block(ticker: str, start_date: str, end_date: str) -> str:
+    """Deterministic headline score: counts and the aggregate of the lexicon score."""
+    try:
+        items, failed = collect_company_news(ticker, start_date, end_date, limit=20)
+    except Exception as exc:  # noqa: BLE001 - the score is a baseline, never required
+        return f"<keyword score unavailable: {exc}>"
+    relevant = [i for i in items if rfmt.is_news_relevant(i.title, ticker, i.confirmed)]
+    scored = [(i.title, sentiment_score(i.title), i.confirmed) for i in items]
+    positive = sum(1 for i in relevant if sentiment_score(i.title) > 0.2)
+    negative = sum(1 for i in relevant if sentiment_score(i.title) < -0.2)
+    lines = [
+        f"Tin đúng mã (✅): {len(relevant)} | tích cực: {positive} | tiêu cực: {negative} | "
+        f"trung tính: {len(relevant) - positive - negative} | tin chung (⚠️): {len(items) - len(relevant)}",
+        "Điểm tác động tin theo từ khoá (-2..+2, chỉ tính tin ✅): "
+        + rfmt.fmt_number(rfmt.relevant_news_impact(scored, ticker)),
+    ]
+    if failed:
+        lines.append(f"Nguồn không truy cập được: {', '.join(failed)}")
+    return "\n".join(lines)
+
+
+def _research_block(ticker: str, start_date: str, end_date: str) -> str:
+    try:
+        return get_broker_research(ticker, start_date, end_date)
+    except Exception as exc:  # noqa: BLE001 - research notes are optional
+        return f"<broker research unavailable: {exc}>"
+
+
+def _foreign_block(ticker: str, trade_date: str) -> str:
+    try:
+        return get_foreign_ownership(ticker, trade_date)
+    except Exception as exc:  # noqa: BLE001 - live enrichment only
+        return f"<foreign ownership unavailable: {exc}>"
 
 
 def create_sentiment_analyst(llm):
     """Create a sentiment analyst node for the trading graph.
 
-    Pre-fetches news + StockTwits + Reddit data, injects them into the
-    prompt as structured blocks, and produces a deterministic sentiment
-    report via structured output (with a free-text fallback for providers
-    that do not support it).
+    Pre-fetches the Vietnamese news flow, a keyword baseline, broker research and
+    (for a run dated today) foreign ownership, injects them into the prompt, and
+    produces a sentiment report via structured output (with a free-text fallback
+    for providers that do not support it).
     """
     structured_llm = bind_structured(llm, SentimentReport, "Sentiment Analyst")
 
     def sentiment_analyst_node(state):
-        ticker = state["company_of_interest"]
+        ticker = normalize_symbol(state["company_of_interest"])
         end_date = state["trade_date"]
-        start_date = _seven_days_back(end_date)
+        start_date = _days_back(end_date, 7)
         instrument_context = get_instrument_context_from_state(state)
 
-        # Pre-fetch all three sources. Each fetcher degrades gracefully and
-        # returns a string (no exceptions surface from here), so the LLM
-        # always sees something — either real data or a clear placeholder.
+        # Pre-fetch every source. Each degrades to a placeholder string, so the
+        # LLM always sees something - either real data or a clear gap.
         news_block = get_news.func(ticker, start_date, end_date)
-        # Pass the analysis window so a historical run trims social posts to it
-        # instead of leaking today's chatter into a backtest (#1220).
-        screen = jev_screen(ticker)
-        stocktwits_block = fetch_stocktwits_messages(
-            ticker, limit=30, start_date=start_date, end_date=end_date, screen=screen
-        )
-        subreddits = subreddits_for(ticker)
-        reddit_block = fetch_reddit_posts(
-            ticker, subreddits, start_date=start_date, end_date=end_date, screen=screen
-        )
-
         system_message = _build_system_message(
             ticker=ticker,
             start_date=start_date,
             end_date=end_date,
             news_block=news_block,
-            stocktwits_block=stocktwits_block,
-            reddit_block=reddit_block,
-            subreddits=subreddits,
+            keyword_block=_keyword_block(ticker, start_date, end_date),
+            research_block=_research_block(ticker, _days_back(end_date, 90), end_date),
+            foreign_block=_foreign_block(ticker, end_date),
         )
 
         prompt = ChatPromptTemplate.from_messages(
@@ -133,67 +158,58 @@ def _build_system_message(
     start_date: str,
     end_date: str,
     news_block: str,
-    stocktwits_block: str,
-    reddit_block: str,
-    subreddits: tuple[str, ...] = DEFAULT_SUBREDDITS,
+    keyword_block: str,
+    research_block: str,
+    foreign_block: str,
 ) -> str:
     """Assemble the sentiment-analyst system message with structured data blocks."""
-    if subreddits == DEFAULT_SUBREDDITS:
-        character = "r/wallstreetbets is often contrarian/exuberant; r/stocks more measured; r/investing longer-term"
-    elif len(subreddits) > len(CRYPTO_SUBREDDITS):
-        character = f"r/{subreddits[0]} leans toward the coin's holders; r/CryptoCurrency and r/CryptoMarkets are broader"
-    else:
-        character = "r/CryptoCurrency and r/CryptoMarkets are broad crypto communities"
-    return f"""You are a financial market sentiment analyst. Your task is to produce a comprehensive sentiment report for {ticker} covering the period from {start_date} to {end_date}, drawing on three complementary data sources that have already been collected for you.
+    return f"""You are a market sentiment analyst covering Vietnamese stocks. Produce a sentiment report for {ticker} covering {start_date} to {end_date}, from the data already collected below.
 
 ## Data sources (pre-fetched, in this prompt)
 
-### News headlines — Yahoo Finance, past 7 days
-Institutional framing. Fact-driven, slower-moving signal.
+### Company news, past 7 days - disclosures (VCI), broker research (CafeF), Vietnamese press (Google News)
+Items marked ✅ are about {ticker}; items marked ⚠️ are sector or market news and must not be read as events of {ticker}.
 
 <start_of_news>
 {news_block}
 <end_of_news>
 
-### StockTwits messages — retail-trader social platform indexed by cashtag
-Fast-moving signal. Each message carries a user-labeled sentiment tag (Bullish / Bearish / no-label) plus the message body.
+### Keyword baseline (deterministic, not a verdict)
+A fixed lexicon score of the same headlines. Use it as a baseline to check your read against; explain any disagreement.
 
-<start_of_stocktwits>
-{stocktwits_block}
-<end_of_stocktwits>
+<start_of_keyword_score>
+{keyword_block}
+<end_of_keyword_score>
 
-### Reddit posts — {", ".join(f"r/{sub}" for sub in subreddits)} (past 7 days)
-Community discussion, without vote or comment counts. Subreddit character matters ({character}).
+### Broker research notes on {ticker}, past 90 days (CafeF)
+Institutional views; each note is the broker's opinion at its date, not a fact.
 
-<start_of_reddit>
-{reddit_block}
-<end_of_reddit>
+<start_of_research>
+{research_block}
+<end_of_research>
 
-## How to analyze this data (best practices)
+### Foreign ownership
+<start_of_foreign>
+{foreign_block}
+<end_of_foreign>
 
-1. **Read the StockTwits Bullish/Bearish ratio as a leading retail-sentiment signal.** A 70/30 bullish/bearish split is moderately bullish; ≥90/10 may indicate over-extension and contrarian risk; 50/50 is uncertainty. Sample size matters — base rates on the actual message count, not percentages alone. A block headed "Screened by Jev" has had off-topic posts removed; its stance count is a classifier's read of every on-topic post fetched, labelled or not, of which the posts listed are a sample. Read it alongside the user tags.
+## How to analyze this data
 
-2. **Look for cross-source divergences.** If news framing is bearish but StockTwits is overwhelmingly bullish, that mismatch is itself a signal — it can mean retail is leaning into a thesis the news flow hasn't caught up to (or vice versa, that retail is chasing while institutions are cautious).
-
-3. **Read Reddit posts for substance.** The feed carries no vote or comment counts, so judge a post by its body excerpt, not its title alone, and do not infer engagement.
-
-4. **Distinguish opinion from event.** A news headline ("Nvidia announces $500M Corning deal") is an event; a StockTwits post ("buying NVDA, this is going to moon") is opinion. Both are inputs but should be weighted differently in your conclusions.
-
-5. **Identify recurring narrative themes.** What topic keeps coming up across sources? That's the dominant narrative driving current sentiment.
-
-6. **Be honest about data limits.** If StockTwits returned only a handful of messages, or one or more sources returned an "<unavailable>" placeholder, the sentiment read is less robust — flag this explicitly in the `confidence` field and the narrative. If the sources are silent on a given subreddit, say so.
-
-7. **Identify catalysts and risks** that emerge across sources — news of upcoming earnings, product launches, competitive threats, macro headlines, etc.
-
-8. **Past sentiment is not predictive.** Frame your conclusions as signal for the trader to weigh alongside fundamentals and technicals, not as a price call.
+1. **Separate events from opinion.** A disclosure (board resolution, quarterly results, dividend) is an event; a press article asking whether the stock is attractive, or a broker note, is opinion. Weight them differently.
+2. **Only ✅ items speak about {ticker}.** ⚠️ items describe the sector or the market; use them as backdrop only.
+3. **Read the Vietnamese press tone carefully.** Headlines about "khối ngoại bán ròng", "lao dốc", "về vùng đáy" signal selling pressure; "mua ròng", "kỷ lục", "bứt phá" signal enthusiasm. Retail-oriented outlets amplify short-term moves: one story repeated by several outlets is one story, not many.
+4. **Look for divergences** between broker research and the press, or between the news tone and the keyword baseline - the mismatch is itself a signal.
+5. **Identify the dominant narrative** and upcoming catalysts (results season, dividend ex-dates, AGMs, index rebalancing, FTSE/MSCI upgrade news, foreign flows).
+6. **Be honest about data limits.** Few ✅ items, or an unavailable source, means low confidence - say so in `confidence` and the narrative.
+7. **Past sentiment is not predictive.** Frame conclusions as a signal for the trader, not a price call.
 
 ## Output fields
 
-Fill the following fields:
-
-- **overall_band**: Exactly one of Bullish / Mildly Bullish / Neutral / Mixed / Mildly Bearish / Bearish. Use Mixed when sources point in clearly different directions; Neutral only when all sources are genuinely silent.
+- **overall_band**: Exactly one of Bullish / Mildly Bullish / Neutral / Mixed / Mildly Bearish / Bearish. Use Mixed when sources point in clearly different directions; Neutral only when the sources are genuinely silent.
 - **overall_score**: A number from 0 (maximally bearish) to 10 (maximally bullish); 5 is neutral. Keep it consistent with overall_band.
-- **confidence**: low / medium / high, based on data quality and sample size.
-- **narrative**: Full source-by-source breakdown, divergences, dominant narrative themes, catalysts and risks, and a markdown summary table of key sentiment signals (direction, source, supporting evidence).
+- **confidence**: low / medium / high, based on how many ✅ items there are and whether any source was unavailable.
+- **narrative**: Source-by-source breakdown, divergences, dominant themes, catalysts and risks, and a markdown summary table of key sentiment signals (direction, source, date, evidence).
+
+{vn_context.GROUNDING_RULES}
 
 {get_language_instruction()}"""

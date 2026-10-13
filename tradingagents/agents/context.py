@@ -6,7 +6,6 @@ from collections.abc import Mapping
 from typing import Any
 
 from tradingagents.dataflows.date_window import is_historical
-from tradingagents.dataflows.vendors.yahoo.fundamentals import get_company_profile
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +58,7 @@ def _clean_identity_value(value: Any) -> str | None:
 
 
 def resolve_instrument_identity(ticker: str) -> dict:
-    """Resolve deterministic identity metadata (company name, sector, …) for a ticker.
+    """Resolve deterministic identity metadata (company name, exchange, sector) for a ticker.
 
     This exists to stop the pipeline from hallucinating a *different* company
     when a chart pattern suggests a different industry than the real one
@@ -67,13 +66,10 @@ def resolve_instrument_identity(ticker: str) -> dict:
     the price action to a narrative and invent an identity that then cascaded
     through every downstream agent.
 
-    Best-effort by design: if yfinance is unavailable, rate-limited, or doesn't
-    recognise the ticker, we return ``{}`` and the caller falls back to
-    ticker-only context rather than failing before analysis starts. An answer
-    is cached for the process; a failed lookup is asked again next time.
-
-    Identity resolves for the same instrument the price path fetches
-    (``XAUUSD`` -> ``GC=F``, #983).
+    Best-effort by design: if the VCI listing is unavailable or does not know
+    the ticker, we return ``{}`` and the caller falls back to ticker-only
+    context rather than failing before analysis starts. An answer is cached
+    for the process; a failed lookup is asked again next time.
     """
     try:
         return _identity(ticker)
@@ -84,23 +80,27 @@ def resolve_instrument_identity(ticker: str) -> dict:
 
 @functools.lru_cache(maxsize=256)
 def _identity(ticker: str) -> dict:
-    """The vendor's identity fields for ``ticker``; raises if the lookup fails."""
-    info = get_company_profile(ticker)
+    """Name, exchange and sector of a Vietnamese code; raises if the lookup fails."""
+    from tradingagents.dataflows.symbols import listing_entry, normalize_symbol
+    from tradingagents.market import vn_rules
+    from tradingagents.quant import sector
+
+    code = normalize_symbol(ticker)
+    if vn_rules.is_index(code):
+        return {"company_name": f"chỉ số {code}", "quote_type": "INDEX"}
+    entry = listing_entry(code)
+    if entry is None:
+        raise LookupError(f"{code} is not in the VCI listing")
     identity: dict[str, str] = {}
-    company_name = _clean_identity_value(info.get("longName")) or _clean_identity_value(
-        info.get("shortName")
-    )
-    if company_name:
-        identity["company_name"] = company_name
-    for source_key, target_key in (
-        ("sector", "sector"),
-        ("industry", "industry"),
-        ("exchange", "exchange"),
-        ("quoteType", "quote_type"),
-    ):
-        value = _clean_identity_value(info.get(source_key))
-        if value:
-            identity[target_key] = value
+    name = _clean_identity_value(entry.get("organName")) or _clean_identity_value(entry.get("organShortName"))
+    if name:
+        identity["company_name"] = name
+    exchange = vn_rules.normalize_exchange(entry.get("board"))
+    if exchange:
+        identity["exchange"] = exchange
+    label = sector.get_primary_sector_label(code)
+    if label != "Khác":
+        identity["sector"] = label
     return identity
 
 
@@ -117,54 +117,37 @@ def build_instrument_context(
     classification are injected so agents anchor to the real company rather
     than pattern-matching the price chart to a wrong one (#814).
 
-    That profile carries no historical vintage: it describes the company today.
-    A run dated earlier gets the current name alone, as a way to tell the
-    company apart from others rather than as what it was called then; a sector,
-    industry or exchange it holds today is not given, since it may not have held
-    on the analysis date.
+    The listing describes the company today. A run dated earlier gets the
+    current name alone, as a way to tell the company apart from others rather
+    than as what it was called then.
     """
-    is_crypto = asset_type == "crypto"
-    instrument_label = "asset" if is_crypto else "instrument"
     context = (
-        f"The {instrument_label} to analyze is `{ticker}`. "
-        "The tools serve this instrument; refer to it by this exact ticker in every report and recommendation, "
-        "preserving any exchange suffix (e.g. `.TO`, `.L`, `.HK`, `.T`, `-USD`)."
+        f"The instrument to analyze is the Vietnamese stock `{ticker}`, quoted in VND. "
+        "The tools serve this instrument; refer to it by this exact ticker in every report and recommendation."
     )
 
     identity = identity or {}
     name = identity.get("company_name") or identity.get("name")
-    label = "Name" if is_crypto else "Company"
     details = []
     if is_historical(trade_date):
         if name:
             details.append(
-                f"{label}: {name} (its current name, given only to identify it; "
+                f"Company: {name} (its current name, given only to identify it; "
                 f"on {trade_date} it may have been named differently)"
             )
     else:
         if name:
-            details.append(f"{label}: {name}")
-        sector, industry = identity.get("sector"), identity.get("industry")
-        if sector and industry:
-            details.append(f"Business classification: {sector} / {industry}")
-        elif sector:
-            details.append(f"Sector: {sector}")
-        elif industry:
-            details.append(f"Industry: {industry}")
-        if identity.get("exchange"):
-            details.append(f"Exchange: {identity['exchange']}")
+            details.append(f"Company: {name}")
+        if identity.get("sector"):
+            details.append(f"Sector: {identity['sector']}")
+    if identity.get("exchange"):
+        details.append(f"Exchange: {identity['exchange']}")
 
     if details:
         context += (
             f" Resolved identity: {'; '.join(details)}. "
             "Do not substitute a different company or ticker unless a tool "
             "result explicitly disproves this resolved identity."
-        )
-
-    if is_crypto:
-        context += (
-            " Treat it as a crypto asset rather than a company, and do not "
-            "assume company fundamentals are available."
         )
     return context
 
@@ -176,15 +159,12 @@ def get_instrument_context_from_state(state: Mapping[str, Any]) -> str:
     stored on the state (see ``TradingAgentsGraph.resolve_instrument_context``).
     Falls back to a ticker-only context — with no network lookup — when the
     state was constructed without it (bare programmatic states, tests), so a
-    consumer is never forced to make a yfinance call mid-graph.
+    consumer is never forced to make a listing call mid-graph.
     """
     context = state.get("instrument_context")
     if isinstance(context, str) and context.strip():
         return context
-    return build_instrument_context(
-        str(state["company_of_interest"]),
-        state.get("asset_type", "stock"),
-    )
+    return build_instrument_context(str(state["company_of_interest"]))
 
 
 def report_or_absent(text: str, source: str) -> str:

@@ -43,53 +43,75 @@ def _prompt_text(prompt) -> str:
     return "\n".join(str(p) for p in parts)
 
 
+QUANT = {
+    "action": "BUY", "exchange": "HOSE", "entry_low": 70500.0, "entry_high": 71200.0,
+    "stop_price": 67000.0, "target_price": 78000.0, "target2": 82000.0,
+    "rr_ratio": 2.1, "position_size_pct": 6.0, "suggested_shares": 800,
+}
+QUANT_REPORT = "ENGINE REPORT: BUY FPT, vùng mua 70.500-71.200 VND"
+
+
+def _assert_quant_grounding(text: str):
+    """Every decision prompt carries the engine's decision and the grounding rules."""
+    from tradingagents.agents import vn_context
+
+    assert vn_context.quant_block({"quant_report": QUANT_REPORT}) in text
+    assert vn_context.NO_INVENT_RULE in text
+    assert vn_context.GROUNDING_RULES in text
+    # The old scale and the "standard allocation" wording are gone.
+    assert "Overweight" not in text and "Underweight" not in text
+    assert "standard allocation" not in text.lower()
+
+
 @pytest.mark.unit
 def test_trader_prompt_states_constraint():
-    from tradingagents.agents.schemas import TraderAction, TraderProposal
+    from tradingagents.agents.schemas import TraderProposal
 
     captured = {}
-    llm = _capturing_llm(captured, TraderProposal(action=TraderAction.BUY, reasoning="x"))
+    llm = _capturing_llm(captured, TraderProposal(reasoning="x", execution_notes="y"))
     create_trader(llm)({
-        "company_of_interest": "NVDA",
-        "investment_plan": "**Recommendation**: Buy",
-        "market_report": "Current price $189.5; ATR 4.2.",
+        "company_of_interest": "FPT",
+        "investment_plan": "**Recommendation**: BUY",
+        "market_report": "Giá đóng cửa 70.900 VND; ATR 1.200.",
+        "quant_decision": QUANT,
+        "quant_report": QUANT_REPORT,
     })
-    assert NO_EXTERNAL_TOOLS in _prompt_text(captured["prompt"])
+    text = _prompt_text(captured["prompt"])
+    assert NO_EXTERNAL_TOOLS in text
+    _assert_quant_grounding(text)
 
 
 @pytest.mark.unit
 def test_research_manager_prompt_states_constraint():
-    from tradingagents.agents.schemas import PortfolioRating, ResearchPlan
+    from tradingagents.agents.schemas import ResearchPlan, Stance
 
     captured = {}
     llm = _capturing_llm(
         captured,
-        ResearchPlan(
-            recommendation=PortfolioRating.BUY, rationale="x", strategic_actions="y"
-        ),
+        ResearchPlan(stance=Stance.AGREE, rationale="x", strategic_actions="y"),
     )
     create_research_manager(llm)({
-        "company_of_interest": "NVDA",
+        "company_of_interest": "FPT",
         "investment_debate_state": {
             "history": "h", "bull_history": "b", "bear_history": "r",
             "current_response": "", "count": 1,
         },
+        "quant_decision": QUANT,
+        "quant_report": QUANT_REPORT,
     })
-    assert NO_EXTERNAL_TOOLS in _prompt_text(captured["prompt"])
+    text = _prompt_text(captured["prompt"])
+    assert NO_EXTERNAL_TOOLS in text
+    _assert_quant_grounding(text)
 
 
 @pytest.mark.unit
 def test_portfolio_manager_prompt_states_constraint():
-    from tradingagents.agents.schemas import PortfolioDecision, PortfolioRating
+    from tradingagents.agents.schemas import PortfolioDecision
 
     captured = {}
     llm = _capturing_llm(
         captured,
-        PortfolioDecision(
-            rating=PortfolioRating.HOLD,
-            executive_summary="x",
-            investment_thesis="y",
-        ),
+        PortfolioDecision(executive_summary="x", investment_thesis="y", key_risks="z"),
     )
     risk = {
         "history": "h", "aggressive_history": "a", "conservative_history": "c",
@@ -98,22 +120,57 @@ def test_portfolio_manager_prompt_states_constraint():
         "latest_speaker": "Neutral", "count": 1,
     }
     create_portfolio_manager(llm)({
-        "company_of_interest": "NVDA",
+        "company_of_interest": "FPT",
         "risk_debate_state": risk,
         "investment_plan": "plan",
         "trader_investment_plan": "trader plan",
+        "quant_decision": QUANT,
+        "quant_report": QUANT_REPORT,
     })
-    assert NO_EXTERNAL_TOOLS in _prompt_text(captured["prompt"])
+    text = _prompt_text(captured["prompt"])
+    assert NO_EXTERNAL_TOOLS in text
+    _assert_quant_grounding(text)
+
+
+@pytest.mark.unit
+def test_a_prompt_without_an_engine_decision_says_the_default_is_no_trade():
+    """When the engine could not run, the prompt says so instead of leaving the
+    model to choose an action."""
+    from tradingagents.agents.schemas import ResearchPlan, Stance
+
+    captured = {}
+    llm = _capturing_llm(captured, ResearchPlan(stance=Stance.AGREE, rationale="x", strategic_actions="y"))
+    out = create_research_manager(llm)({
+        "company_of_interest": "FPT",
+        "investment_debate_state": {
+            "history": "h", "bull_history": "b", "bear_history": "r",
+            "current_response": "", "count": 1,
+        },
+    })
+    assert "NO_TRADE" in _prompt_text(captured["prompt"])
+    assert out["investment_plan"].startswith("**Recommendation**: NO_TRADE")
+
+
+def _stub_sentiment_sources(monkeypatch, calls=None):
+    """Pre-fetched sources are stubbed so the prompt builds without network I/O."""
+    def _rec(name, value):
+        def _f(*a, **k):
+            if calls is not None:
+                calls.append((name, a))
+            return value
+        return _f
+
+    monkeypatch.setattr(sentiment.get_news, "func", _rec("news", "NEWS-BLOCK"), raising=False)
+    monkeypatch.setattr(sentiment, "_keyword_block", _rec("keyword", "KEYWORD-BLOCK"))
+    monkeypatch.setattr(sentiment, "_research_block", _rec("research", "RESEARCH-BLOCK"))
+    monkeypatch.setattr(sentiment, "_foreign_block", _rec("foreign", "FOREIGN-BLOCK"))
 
 
 @pytest.mark.unit
 def test_sentiment_prompt_states_constraint(monkeypatch):
     from tradingagents.agents.schemas import SentimentBand, SentimentReport
 
-    # Pre-fetched sources are stubbed so the prompt builds without network I/O.
-    monkeypatch.setattr(sentiment, "fetch_stocktwits_messages", lambda *a, **k: "st")
-    monkeypatch.setattr(sentiment, "fetch_reddit_posts", lambda *a, **k: "rd")
-    monkeypatch.setattr(sentiment.get_news, "func", lambda *a, **k: "news", raising=False)
+    _stub_sentiment_sources(monkeypatch)
 
     captured = {}
     llm = _capturing_llm(captured, SentimentReport(
@@ -121,7 +178,7 @@ def test_sentiment_prompt_states_constraint(monkeypatch):
         confidence="high", narrative="n",
     ))
     sentiment.create_sentiment_analyst(llm)({
-        "company_of_interest": "NVDA", "trade_date": "2026-01-15",
+        "company_of_interest": "FPT", "trade_date": "2026-01-15",
         "asset_type": "stock", "messages": [],
     })
     text = _prompt_text(captured["prompt"])
@@ -149,20 +206,29 @@ def test_constraint_text_is_unambiguous():
 
 
 @pytest.mark.unit
-def test_the_sentiment_prompt_names_the_subreddits_searched(monkeypatch):
+def test_the_sentiment_prompt_names_the_sources_searched(monkeypatch):
+    """The prompt names the Vietnamese sources it carries and the windows they
+    cover, and every pre-fetched block reaches it; the old social sources
+    (StockTwits, Reddit) are gone."""
     from tradingagents.agents.schemas import SentimentBand, SentimentReport
 
-    monkeypatch.setattr(sentiment, "fetch_stocktwits_messages", lambda *a, **k: "st")
-    monkeypatch.setattr(sentiment, "fetch_reddit_posts", lambda *a, **k: "rd")
-    monkeypatch.setattr(sentiment.get_news, "func", lambda *a, **k: "news", raising=False)
+    calls = []
+    _stub_sentiment_sources(monkeypatch, calls)
     captured = {}
     llm = _capturing_llm(captured, SentimentReport(
         overall_band=SentimentBand.NEUTRAL, overall_score=5.0, confidence="low", narrative="n",
     ))
     sentiment.create_sentiment_analyst(llm)({
-        "company_of_interest": "BTC-USD", "trade_date": "2026-01-15",
-        "asset_type": "crypto", "messages": [],
+        "company_of_interest": "fpt.vn", "trade_date": "2026-01-15",
+        "asset_type": "stock", "messages": [],
     })
     text = _prompt_text(captured["prompt"])
-    assert "r/Bitcoin, r/CryptoCurrency, r/CryptoMarkets" in text
-    assert "wallstreetbets" not in text
+    for block in ("NEWS-BLOCK", "KEYWORD-BLOCK", "RESEARCH-BLOCK", "FOREIGN-BLOCK"):
+        assert block in text
+    assert "disclosures (VCI), broker research (CafeF), Vietnamese press (Google News)" in text
+    assert "stocktwits" not in text.lower() and "reddit" not in text.lower()
+    # Every source is asked for the normalised code over the run's own windows.
+    assert ("news", ("FPT", "2026-01-08", "2026-01-15")) in calls
+    assert ("keyword", ("FPT", "2026-01-08", "2026-01-15")) in calls
+    assert ("research", ("FPT", "2025-10-17", "2026-01-15")) in calls
+    assert ("foreign", ("FPT", "2026-01-15")) in calls

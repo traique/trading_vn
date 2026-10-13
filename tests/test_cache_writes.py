@@ -7,9 +7,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from tradingagents.dataflows import files
-from tradingagents.dataflows.vendors import sec_edgar
-from tradingagents.dataflows.vendors.yahoo import ohlcv
+from tradingagents.dataflows import files, ohlcv
 
 
 def _recording_replace(monkeypatch):
@@ -25,31 +23,17 @@ def _recording_replace(monkeypatch):
 
 
 @pytest.mark.unit
-def test_sec_edgar_writers_never_share_a_temp_file(monkeypatch, tmp_path):
-    monkeypatch.setattr(sec_edgar, "get_config", lambda: {"data_cache_dir": str(tmp_path)})
-    monkeypatch.setattr(sec_edgar, "_fetch_json", lambda url: {"url": url})
-    moves = _recording_replace(monkeypatch)
-
-    sec_edgar._cached_json("https://example/a", "facts.json")
-    (tmp_path / "sec_edgar" / "facts.json").unlink()
-    sec_edgar._cached_json("https://example/a", "facts.json")
-
-    temps = [src for src, _ in moves]
-    assert len(set(temps)) == 2
-    assert all(src.parent == dst.parent for src, dst in moves)
-
-
-@pytest.mark.unit
 def test_the_price_cache_is_replaced_whole(monkeypatch, tmp_path):
-    frame = pd.DataFrame({"Date": pd.bdate_range("2026-01-02", periods=3), "Open": 1.0, "High": 1.0,
-                          "Low": 1.0, "Close": 1.0, "Volume": 1})
-    monkeypatch.setattr(ohlcv, "get_config", lambda: {"data_cache_dir": str(tmp_path)})
-    monkeypatch.setattr(ohlcv.yf, "Ticker", lambda s: type("T", (), {"history": lambda self, **k: frame.set_index("Date")})())
+    frame = pd.DataFrame({"Date": ["2026-01-02", "2026-01-05", "2026-01-06"], "Open": 1000.0,
+                          "High": 1000.0, "Low": 1000.0, "Close": 1000.0, "Volume": 100})
+    monkeypatch.setattr(ohlcv, "get_config", lambda: {"data_cache_dir": str(tmp_path),
+                                                      "data_vendors": {"core_stock_apis": "dnse"}})
+    monkeypatch.setattr(ohlcv, "_fetchers", lambda: {"dnse": lambda *a: frame, "vci": lambda *a: frame})
     moves = _recording_replace(monkeypatch)
 
-    ohlcv.load_ohlcv("AAPL", "2026-01-06")
+    ohlcv.load_ohlcv("FPT", "2026-01-06")
 
-    assert [dst.name for _, dst in moves] == ["AAPL-YFin-data.csv"]
+    assert [dst.name for _, dst in moves] == ["FPT-dnse-ohlcv.csv"]
     assert moves[0][0].parent == tmp_path and moves[0][0] != moves[0][1]
     assert not list(tmp_path.glob("*.tmp*"))
 

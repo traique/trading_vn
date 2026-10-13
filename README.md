@@ -77,9 +77,18 @@ TradingAgents is a multi-agent trading framework that mirrors the dynamics of re
 
 Our framework decomposes complex trading tasks into specialized roles.
 
+### Vietnamese market edition
+
+This edition analyses **Vietnamese stocks only** (HOSE, HNX, UPCoM), benchmarked against **VNINDEX**, with reports in Vietnamese by default:
+
+- **Data**: daily prices from DNSE with VCI as fallback (VND, adjusted for dividends and bonus issues); financial statements, ratios, corporate events and company disclosures from VCI; broker research from CafeF; news from Google News (Vietnamese edition). All public, no key, no Yahoo.
+- **Point-in-time**: a run dated D sees only closed sessions up to D (today's forming bar is dropped during the session), statements published by D (VCI records each statement's publication date), and news dated inside its window. Live-only data (foreign ownership, analyst targets) is withheld from past runs.
+- **The system decides, the agents explain**: a deterministic **Quant Engine** (ported from the lananh-main policy layer) runs beside the analysts and fixes the action - `BUY`, `HOLD`, `WATCH`, `SELL` (exit a holding; no short selling) or `NO_TRADE` - with the entry zone, stop, targets, risk/reward (at least 1.5) and position size. The researchers, trader, risk team and portfolio manager argue and explain around that decision but cannot change it. A final **Output Guard** node checks their text in code: a contradicting action is replaced by the system summary, a price found in none of the data is flagged, and the final rating is always the engine's.
+- **Market rules**: price bands (HOSE ±7%, HNX ±10%, UPCoM ±15%), tick sizes (HOSE 10/50/100đ, HNX/UPCoM 100đ), board lots of 100, T+2 settlement (no exit before the third session), ATO/ATC sessions, and round-trip costs live in `tradingagents/market/vn_rules.py`.
+
 ### Analyst Team
 - Fundamentals Analyst: Evaluates company financials and performance metrics, identifying intrinsic values and potential red flags.
-- Sentiment Analyst: Aggregates news headlines, StockTwits, and Reddit chatter into a single sentiment read to gauge short-term market mood.
+- Sentiment Analyst: Reads the Vietnamese news flow (company disclosures, broker research, press) against a fixed keyword baseline and, for today's runs, foreign ownership, into a single sentiment read.
 - News Analyst: Monitors global news and macroeconomic indicators, interpreting the impact of events on market conditions.
 - Technical Analyst: Utilizes technical indicators (like MACD and RSI) to detect trading patterns and forecast price movements.
 
@@ -176,10 +185,9 @@ export MISTRAL_API_KEY=...         # Mistral
 export MOONSHOT_API_KEY=...        # Kimi (Moonshot)
 export GROQ_API_KEY=...            # Groq
 export NVIDIA_API_KEY=...          # NVIDIA NIM
-export FRED_API_KEY=...            # FRED macro data (free, optional)
-export ALPHA_VANTAGE_API_KEY=...   # Alpha Vantage
-export TYPESAFE_API_KEY=...        # Jev social-post screening (optional)
 ```
+
+Market data (DNSE, VCI, CafeF, Google News) needs no key.
 
 For Azure OpenAI, copy `.env.enterprise.example` to `.env.enterprise` and fill in your credentials.
 
@@ -188,8 +196,6 @@ For AWS Bedrock, install the extra with `pip install ".[bedrock]"`, set `llm_pro
 For local models, configure Ollama with `llm_provider: "ollama"`. The default endpoint is `http://localhost:11434/v1`; set `OLLAMA_BASE_URL` to point at a remote `ollama-serve`. Pull models with `ollama pull <name>`, and pick "Custom model ID" in the CLI for any model not listed by default.
 
 For any other OpenAI-compatible server (vLLM, LM Studio, llama.cpp, or a custom relay), use `llm_provider: "openai_compatible"` and set the endpoint via `backend_url` (or `TRADINGAGENTS_LLM_BACKEND_URL`), e.g. `http://localhost:8000/v1` for vLLM or `http://localhost:1234/v1` for LM Studio. The model is whatever your server serves. No key is needed for local servers; set `OPENAI_COMPATIBLE_API_KEY` when the endpoint requires one.
-
-With `TYPESAFE_API_KEY` set, the Sentiment Analyst screens StockTwits and Reddit posts with TypeSafe's Jev before reading them. Posts that are not about the company are dropped, and each source opens with a count of the remaining posts by stance: bullish, bearish, neutral, or unclear. Without the key, posts pass through unscreened. `jev-latest` moves with new releases; set `TYPESAFE_DEFAULT_MODEL` to a versioned ID such as `jev-1.13.0` to hold it fixed across runs. To reach Jev through OpenRouter, put an OpenRouter key in `TYPESAFE_API_KEY` and set `TYPESAFE_BASE_URL=https://openrouter.ai/api`.
 
 Alternatively, copy `.env.example` to `.env` and fill in your keys:
 ```bash
@@ -208,22 +214,16 @@ You will see a screen where you can select your desired tickers, analysis date, 
 To run without questions, for a scheduled job or a script, answer the per-run steps with flags and the rest with `TRADINGAGENTS_*` variables:
 ```bash
 export TRADINGAGENTS_LLM_PROVIDER=openai TRADINGAGENTS_QUICK_THINK_LLM=gpt-6-luna TRADINGAGENTS_DEEP_THINK_LLM=gpt-6-sol
-export TRADINGAGENTS_OUTPUT_LANGUAGE=English TRADINGAGENTS_MAX_DEBATE_ROUNDS=1 TRADINGAGENTS_MAX_RISK_ROUNDS=1
-tradingagents --ticker NVDA --date 2026-09-23 --analysts market,news,fundamentals --save --no-show
+export TRADINGAGENTS_OUTPUT_LANGUAGE=Vietnamese TRADINGAGENTS_MAX_DEBATE_ROUNDS=1 TRADINGAGENTS_MAX_RISK_ROUNDS=1
+tradingagents --ticker FPT --date 2026-10-13 --analysts market,news,fundamentals --save --no-show
 ```
 Each flag skips only its own question. Run without a terminal, a missing answer stops the run before it starts and names the flag or variable to set.
 
-A saved report also includes `complete_report.html`, the report as one page with its sections listed beside the text, for reading in a browser, on a phone or in print. Answering the save question at the prompt also asks about the page and can open it in your browser; `--no-html` skips it, and so does `ta.save_reports(state, "NVDA", html=False)` from Python.
+A saved report also includes `complete_report.html`, the report as one page with its sections listed beside the text, for reading in a browser, on a phone or in print. Answering the save question at the prompt also asks about the page and can open it in your browser; `--no-html` skips it, and so does `ta.save_reports(state, "FPT", html=False)` from Python.
 
 ### Markets and tickers
 
-TradingAgents works with any market Yahoo Finance covers, using the exchange-suffixed ticker. Company identity and the alpha benchmark resolve automatically per market.
-
-- US: `AAPL`, `SPY`
-- Hong Kong: `0700.HK` · Tokyo: `7203.T` · London: `AZN.L`
-- India: `RELIANCE.NS`, `.BO` · Canada: `.TO` · Australia: `.AX`
-- China A-shares: Shanghai `.SS`, Shenzhen `.SZ` (e.g. `600519.SS` for Kweichow Moutai)
-- Crypto: `BTC-USD`, `ETH-USD`
+Any stock listed on HOSE, HNX or UPCoM, by its code. These all name the same stock: `FPT`, `fpt`, `FPT.VN`, `HOSE:FPT`. The exchange, company name and sector are resolved from the VCI listing; the alpha benchmark is VNINDEX. Indices (`VNINDEX`, `VN30`, `HNX`, `HNX30`, `UPCOM`) are served as market context, but an index has no trading decision of its own.
 
 <p align="center">
   <img src="assets/cli/cli_init.png" width="100%" style="display: inline-block; margin: 0 2%;">
@@ -256,11 +256,11 @@ from tradingagents.default_config import DEFAULT_CONFIG
 ta = TradingAgentsGraph(debug=True, config=DEFAULT_CONFIG.copy())
 
 # forward propagate
-state, decision = ta.propagate("NVDA", "2026-09-01")
+state, decision = ta.propagate("FPT", "2026-10-13")
 print(decision)
 
 # the same report tree the CLI saves, under results_dir/reports
-ta.save_reports(state, "NVDA")
+ta.save_reports(state, "FPT")
 ```
 
 You can also adjust the default configuration to set your own choice of LLMs, debate rounds, etc.
@@ -276,7 +276,7 @@ config["quick_think_llm"] = "gpt-6-luna"   # Model for quick tasks
 config["max_debate_rounds"] = 2
 
 ta = TradingAgentsGraph(debug=True, config=config)
-_, decision = ta.propagate("NVDA", "2026-09-01")
+_, decision = ta.propagate("FPT", "2026-10-13")
 print(decision)
 ```
 
@@ -291,35 +291,25 @@ A tier on its own provider uses that provider's key and default endpoint; set `q
 
 See `tradingagents/default_config.py` for all configuration options.
 
-### Fundamentals as filed
+### Fundamentals as published
 
-US company statements come from SEC EDGAR, which records the date every figure was filed. A run dated in the past reads the statements exactly as they stood that day: a fiscal year that has ended but has not been filed yet is not served, and a figure restated later still reads as first reported. Apple's 2008 total assets were filed as $39.6B and restated to $36.2B in 2010, so a run dated in between reads $39.6B. EDGAR needs no account or API key.
+Statements, ratios and corporate events come from VCI, which records the date each quarterly and annual statement was published. A run dated in the past reads only the statements public by that day; a statement VCI holds without a publication date is treated as published at the legal deadline (45 days after quarter end, 90 days after year end). TTM ratios (P/E, P/B, ROE, ...) follow their quarter. Banks, securities firms, insurers and real-estate developers are valued on P/B against their sector, other companies on P/E.
 
-Other companies' statements come from Yahoo Finance, which dates a statement by the period it covers rather than by when it was published. A run dated today reads them; a run dated in the past is told they are withheld, since Yahoo cannot say which figures were public by then.
-
-Insider trades are dated by when they happened, not when they were filed, so a run dated in the past is told they are withheld as well.
-
-SEC asks callers to identify themselves and refuses requests that carry no contact address, so a default one is sent. Set your own so SEC can reach you rather than the project:
-
-```bash
-SEC_EDGAR_USER_AGENT="Your Name your@email.com"
-```
-
-It covers companies that file with the SEC, including foreign companies listed in the US. Anything else, such as Hong Kong or A-share listings, falls through to the next vendor in the chain. EDGAR's machine-readable filings begin in 2009, and a fourth quarter is reported as unavailable rather than derived, because filers publish it only inside the annual figure.
+Insider and major-shareholder deals are served as the registrations and results disclosed by the run date. Foreign ownership, the current profile and analysts' target prices exist only as of today, so a past run is told they are withheld.
 
 ### Current holdings
 
-By default the agents do not know what you hold, so their guidance is written for a reader who applies it to their own position. Pass a portfolio to have the trader, the risk analysts and the portfolio manager work against your actual book.
+By default the agents do not know what you hold, so their guidance is written for a reader who applies it to their own position. Pass a portfolio to have the quant engine and the decision agents work against your actual book: a holding turns a bearish read into SELL (exit) or HOLD instead of NO_TRADE, and with cash given the position size is also stated in board lots of 100 shares.
 
 ```python
 from tradingagents.portfolio import PortfolioContext
 
 portfolio = PortfolioContext.model_validate({
-    "cash": 25000.0,
-    "currency": "USD",
-    "positions": [{"ticker": "NVDA", "quantity": 120, "average_price": 150.0}],
+    "cash": 500_000_000,
+    "currency": "VND",
+    "positions": [{"ticker": "FPT", "quantity": 1000, "average_price": 62_000}],
 })
-_, decision = ta.propagate("NVDA", "2026-09-01", portfolio=portfolio)
+_, decision = ta.propagate("FPT", "2026-10-13", portfolio=portfolio)
 ```
 
 The CLI takes the same content as a JSON file: `tradingagents --portfolio my_book.json`.
@@ -353,7 +343,7 @@ tradingagents --clear-checkpoints    # reset before running
 config = DEFAULT_CONFIG.copy()
 config["checkpoint_enabled"] = True
 ta = TradingAgentsGraph(config=config)
-_, decision = ta.propagate("NVDA", "2026-09-01")
+_, decision = ta.propagate("FPT", "2026-10-13")
 ```
 
 ## Evaluating decisions over time
@@ -364,14 +354,14 @@ One run gives one decision, which cannot tell you whether the system decides wel
 from tradingagents.backtest import iter_grid, run_backtest, summarize
 
 dates = iter_grid("2026-06-01", "2026-08-01", every_n_days=7)
-result = run_backtest(["NVDA", "AAPL"], dates, config, selected_analysts=["market", "news"])
+result = run_backtest(["FPT", "HPG"], dates, config, selected_analysts=["market", "news"])
 print(summarize(result).render())
 ```
 
 From the CLI:
 
 ```bash
-tradingagents backtest NVDA,AAPL --start 2026-06-01 --end 2026-08-01 --every 7
+tradingagents backtest FPT,HPG --start 2026-06-01 --end 2026-08-01 --every 7
 ```
 
 Each cell is scored on realized alpha against the instrument's regional benchmark, grouped by rating. Your own memory log is never written to, and re-running the same grid with `run_id=result.run_id` skips the cells that already ran, so an interrupted sweep continues where it stopped.
@@ -382,7 +372,7 @@ TradingAgents is LLM-driven, so two runs of the same ticker and date can differ.
 
 Language model sampling is non-deterministic. Even at a fixed temperature, providers do not guarantee byte-identical output across calls, and reasoning models (the default GPT-6 family, and any thinking-mode model) vary the most because their internal reasoning is itself sampled.
 
-Live data moves. News, StockTwits, and Reddit return different content as time passes, so a run today sees different inputs than a run last week even for the same historical trade date. Pin the analysis date to hold the price and indicator window fixed, but the social and news sources still reflect "now".
+Live data moves. Google News search results change as time passes, so a run today can see different headlines than a run last week even for the same historical trade date. Pin the analysis date to hold the price window, the statements and the system decision fixed: the quant engine is deterministic for a given date and price history. Prices are adjusted by the source for corporate actions as of today, so absolute levels of a past date can differ from the prices traded then by the adjustment factor; returns and indicators are unaffected.
 
 To reduce variation you can lower the sampling temperature. Set `temperature` in your config (or `TRADINGAGENTS_TEMPERATURE` in `.env`); lower values make models that honor it more repeatable. The current curated models are reasoning-first and largely ignore temperature, so for tighter reproducibility name a non-reasoning model in your config, or in `TRADINGAGENTS_DEEP_THINK_LLM` and `TRADINGAGENTS_QUICK_THINK_LLM`. Any model ID your provider serves is accepted, whether or not the picker lists it.
 

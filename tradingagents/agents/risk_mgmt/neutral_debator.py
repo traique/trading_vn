@@ -1,3 +1,4 @@
+from tradingagents.agents import vn_context
 from tradingagents.agents.context import (
     get_instrument_context_from_state,
     get_language_instruction,
@@ -28,6 +29,7 @@ def create_neutral_debator(llm):
         portfolio_context = get_portfolio_context_from_state(state)
 
         trader_decision = state["trader_investment_plan"]
+        quant_block = vn_context.quant_block(state)
 
         prompt = f"""As the Neutral Risk Analyst, your role is to provide a balanced perspective, weighing both the potential benefits and risks of the trader's decision or plan. You prioritize a well-rounded approach, evaluating the upsides and downsides while factoring in broader market trends, potential economic shifts, and diversification strategies.Here is the trader's decision:
 
@@ -38,12 +40,18 @@ Your task is to challenge both the Aggressive and Conservative Analysts, pointin
 {instrument_context}
 {portfolio_context}
 Market Research Report: {market_research_report}
-Social Media Sentiment Report: {sentiment_report}
-Latest World Affairs Report: {news_report}
+Sentiment Report: {sentiment_report}
+News and Market Backdrop Report: {news_report}
 Company Fundamentals Report: {fundamentals_report}
 Here is the current conversation history: {history} Here is the last response from the aggressive analyst: {current_aggressive_response} Here is the last response from the conservative analyst: {current_conservative_response}. If there are no responses from the other viewpoints yet, present your own argument based on the available data.
 
-Engage actively by analyzing both sides critically, addressing weaknesses in the aggressive and conservative arguments to advocate for a more balanced approach. Challenge each of their points to illustrate why a moderate risk strategy might offer the best of both worlds, providing growth potential while safeguarding against extreme volatility. Focus on debating rather than simply presenting data, aiming to show that a balanced view can lead to the most reliable outcomes. Output conversationally as if you are speaking without any special formatting.""" + get_language_instruction()
+Engage actively by analyzing both sides critically, addressing weaknesses in the aggressive and conservative arguments to advocate for a more balanced approach. Challenge each of their points to illustrate why a moderate risk strategy might offer the best of both worlds, providing growth potential while safeguarding against extreme volatility. Focus on debating rather than simply presenting data, aiming to show that a balanced view can lead to the most reliable outcomes. Output conversationally as if you are speaking without any special formatting.
+
+The quantitative system has already fixed the action and every number of the plan (entry zone, stop, targets, size) in the block below. Debate the risk of executing that plan - and of the alternative of standing aside - but do not propose different numbers or a different action. Vietnamese rules apply: daily price band, board lots of 100, T+2 settlement (a bad entry cannot be exited before the third session), no short selling.
+
+{quant_block}
+
+{vn_context.NO_INVENT_RULE}""" + get_language_instruction()
 
         response = llm.invoke(prompt)
 

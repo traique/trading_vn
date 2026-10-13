@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "tradingagents"
 dynamic = ["version"]
-description = "TradingAgents: Multi-Agents LLM Financial Trading Framework"
+description = "TradingAgents: Multi-Agents LLM Financial Trading Framework for the Vietnamese stock market"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -18,14 +18,12 @@ dependencies = [
     "markdown-it-py>=4.0",
     "pandas>=3.0.6",
     "python-dotenv>=1.0.0",
-    "pytz>=2025.2",
     "questionary>=2.1.0",
     "requests>=2.32.4",
     "rich>=14.0.0",
     "typer>=0.21.0",
     "stockstats>=0.6.5",
     "typing-extensions>=4.14.0",
-    "yfinance>=1.7.0",
 ]
 
 [project.optional-dependencies]
@@ -68,7 +66,7 @@ filterwarnings = [
 [tool.ruff]
 line-length = 100
 target-version = "py311"
-extend-exclude = ["results"]
+extend-exclude = ["results", "lananh-main", "TradingAgents-Vn-main"]
 
 [tool.ruff.lint]
 # Standard "good defaults" rule set (pyflakes + pycodestyle + isort + bugbear +

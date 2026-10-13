@@ -242,6 +242,8 @@ def _run_details(final_state: dict, settings: dict | None) -> list[tuple[str, st
         details.append(("Version", escape(f"TradingAgents {s('version', '?')}")))
     if final_state.get("memory_note"):
         details.append(("Memory log", escape(final_state["memory_note"])))
+    if final_state.get("guard_notes"):
+        details.append(("Output Guard", escape("; ".join(final_state["guard_notes"].splitlines()))))
     return details
 
 

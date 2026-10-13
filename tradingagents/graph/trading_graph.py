@@ -12,9 +12,10 @@ from tradingagents.agents.context import build_instrument_context, resolve_instr
 from tradingagents.agents.rating import run_rating
 from tradingagents.dataflows.config import run_config, run_config_context, set_config
 from tradingagents.dataflows.date_window import get_current_date, is_historical
-from tradingagents.dataflows.symbols import safe_ticker_component
+from tradingagents.dataflows.symbols import normalize_symbol, safe_ticker_component
 from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.llm_clients import create_tier_client, tier_provider
+from tradingagents.market import vn_rules
 from tradingagents.memory import TradingMemoryLog, settlement
 from tradingagents.memory.reflection import Reflector
 from tradingagents.reporting import write_report_tree
@@ -89,6 +90,12 @@ class TradingAgentsGraph:
         # and its wrap-up; a limit past the recursion limit would end the run
         # there instead.
         max_tool_rounds, max_recur_limit = self.config["max_tool_rounds"], self.config["max_recur_limit"]
+        # A buy settles T+2 and cannot be sold before the third session, so a
+        # shorter window would score an outcome no trader could have realised.
+        if int(self.config.get("holding_period_days", 5)) < vn_rules.SETTLEMENT_BARS:
+            raise ValueError(
+                f"holding_period_days must be at least {vn_rules.SETTLEMENT_BARS} (T+2 settlement)"
+            )
         if 2 * max_tool_rounds + 2 >= max_recur_limit:
             raise ValueError(
                 f"max_tool_rounds={max_tool_rounds} needs max_recur_limit above {2 * max_tool_rounds + 2}"
@@ -118,7 +125,7 @@ class TradingAgentsGraph:
                                    trade_date: str | None = None) -> str:
         """Resolve ticker identity once and return the full instrument context.
 
-        Deterministic yfinance lookup (cached, fail-open) injected into a
+        Deterministic VCI listing lookup (cached, fail-open) injected into a
         context string so every agent anchors to the real company instead of
         hallucinating one from the price chart (#814). Both the propagate()
         path and the CLI call this so the resolved identity reaches the whole
@@ -167,20 +174,21 @@ class TradingAgentsGraph:
     def propagate(self, company_name, trade_date, asset_type: str = "stock", portfolio=None):
         """Run the trading agents graph for a company on a specific date.
 
-        ``asset_type`` selects between the stock pipeline (default) and the
-        crypto pipeline (``"crypto"``) shipped in #567 — the CLI auto-detects
-        from the ticker; programmatic callers pass it explicitly. When
+        ``company_name`` is a Vietnamese stock code (``FPT``, ``FPT.VN`` and
+        ``HOSE:FPT`` all work); ``asset_type`` must be ``"stock"``. When
         ``checkpoint_enabled`` is set in config, the graph is recompiled with
         a per-ticker SqliteSaver so a crashed run can resume from the last
         successful node on a subsequent invocation with the same ticker+date.
 
-        Returns ``(final_state, signal)`` where ``signal`` is one of the 5-tier
-        ratings (Buy / Overweight / Hold / Underweight / Sell) or ``"REVIEW"``
-        when the decision had no parseable rating (#1170); guard with
-        ``tradingagents.agents.rating.is_review`` before mapping it to the
-        PortfolioRating enum.
+        Returns ``(final_state, signal)`` where ``signal`` is the quantitative
+        engine's action (BUY / HOLD / WATCH / SELL / NO_TRADE), or ``"REVIEW"``
+        when a state carries no readable action (#1170); guard with
+        ``tradingagents.agents.rating.is_review``.
         """
         trade_date = _validate_trade_date(trade_date)
+        if asset_type != "stock":
+            raise ValueError(f"only Vietnamese stocks are supported, got asset_type={asset_type!r}")
+        company_name = normalize_symbol(company_name)
 
         with run_config(self.config), \
                 self.checkpoint_scope(company_name, trade_date, asset_type, portfolio) as thread_id_value:
@@ -303,6 +311,7 @@ class TradingAgentsGraph:
             asset_type=asset_type,
             instrument_context=self.resolve_instrument_context(company_name, asset_type, trade_date),
             portfolio_context=portfolio.render(company_name) if portfolio is not None else "",
+            portfolio=portfolio.model_dump() if portfolio is not None else None,
         )
 
     def _memory_step(self, state):
@@ -461,6 +470,9 @@ class TradingAgentsGraph:
             "investment_plan": final_state["investment_plan"],
             "final_trade_decision": final_state["final_trade_decision"],
             "final_rating": run_rating(final_state),
+            "quant_decision": final_state.get("quant_decision") or {},
+            "quant_report": final_state.get("quant_report") or "",
+            "guard_notes": final_state.get("guard_notes") or "",
             "run_settings": self.run_settings(),
         }
 

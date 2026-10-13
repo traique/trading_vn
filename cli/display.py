@@ -381,6 +381,13 @@ def display_complete_report(final_state):
     console.print()
     console.print(Rule("Complete Analysis Report", style="bold green"))
 
+    # 0. The quantitative system's decision, which every agent explains
+    if final_state.get("quant_report"):
+        console.print(Panel("[bold]0. Quantitative System Decision[/bold]", border_style="green"))
+        console.print(Panel(final_state["quant_report"], title="Quant Engine", border_style="blue", padding=(1, 2)))
+    if final_state.get("guard_notes"):
+        console.print(Panel(final_state["guard_notes"], title="Output Guard", border_style="yellow", padding=(1, 2)))
+
     # I. Analyst Team Reports
     analysts = []
     if final_state.get("market_report"):

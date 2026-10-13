@@ -40,8 +40,6 @@ class TestFlagValues:
         assert prompts.parse_analysts(" Market, news ", AssetType.STOCK) == [AnalystType.MARKET, AnalystType.NEWS]
         with pytest.raises(ValueError, match="market, sentiment, news, fundamentals"):
             prompts.parse_analysts("market,macro", AssetType.STOCK)
-        with pytest.raises(ValueError, match="crypto"):
-            prompts.parse_analysts("fundamentals", AssetType.CRYPTO)
         with pytest.raises(ValueError, match="at least one"):
             prompts.parse_analysts(" , ", AssetType.STOCK)
 

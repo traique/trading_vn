@@ -49,7 +49,7 @@ def analyze(
         help="JSON file with current holdings and cash, so the trader, risk and "
         "portfolio agents size against your actual position.",
     ),
-    ticker: str = typer.Option(None, "--ticker", help="Ticker to analyze, e.g. NVDA or 0700.HK; skips the prompt"),
+    ticker: str = typer.Option(None, "--ticker", help="Vietnamese stock code to analyze, e.g. FPT or HOSE:SSI; skips the prompt"),
     date: str = typer.Option(None, "--date", help="Analysis date, YYYY-MM-DD; skips the prompt"),
     analysts: str = typer.Option(
         None, "--analysts", help="Comma-separated analysts, e.g. market,news; skips the prompt"
@@ -102,14 +102,13 @@ def analyze(
 
 @app.command()
 def backtest(
-    tickers: str = typer.Argument(..., help="Comma-separated tickers, e.g. NVDA,AAPL"),
+    tickers: str = typer.Argument(..., help="Comma-separated Vietnamese codes, e.g. FPT,HPG,VCB"),
     start: str = typer.Option(..., "--start", help="First analysis date, YYYY-MM-DD"),
     end: str = typer.Option(..., "--end", help="Last analysis date, YYYY-MM-DD"),
     every: int = typer.Option(7, "--every", help="Days between analysis dates"),
     analysts: str = typer.Option(
-        None, "--analysts", help="Comma-separated analysts to run: market, sentiment, news, fundamentals; omit for all the asset type allows"
+        None, "--analysts", help="Comma-separated analysts to run: market, sentiment, news, fundamentals; omit for all"
     ),
-    asset_type: str = typer.Option("stock", "--asset-type", help="stock or crypto"),
     portfolio: str = typer.Option(
         None, "--portfolio", help="JSON file with holdings and cash, held constant across the grid"
     ),
@@ -122,7 +121,7 @@ def backtest(
     try:
         dates = iter_grid(start, end, every)
         book = load_portfolio(portfolio) if portfolio else None
-        kind = AssetType(asset_type.strip().lower())
+        kind = AssetType.STOCK
         # The analysts are named and checked as for an analysis; without a
         # choice, every analyst the asset type allows runs.
         chosen = (parse_analysts(analysts, kind) if analysts
@@ -133,7 +132,7 @@ def backtest(
 
     names = [t.strip() for t in tickers.split(",") if t.strip()]
     if not names:
-        console.print("[red]No ticker to analyze; pass them comma-separated, e.g. NVDA,AAPL[/red]")
+        console.print("[red]No ticker to analyze; pass them comma-separated, e.g. FPT,HPG[/red]")
         raise typer.Exit(code=1)
 
     def show_progress(done, total, ticker, date):

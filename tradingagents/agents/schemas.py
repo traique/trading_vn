@@ -7,6 +7,8 @@ three decision-making agents (Research Manager, Trader, Portfolio Manager)
 so that:
 
 - Their outputs follow consistent section headers across runs and providers
+- The action and every price level come from the quantitative engine; the
+  schemas only ask the model for the explanation
 - Each provider's native structured-output mode is used (json_schema for
   OpenAI/xAI, response_schema for Gemini, tool-use for Anthropic)
 - Schema field descriptions become the model's output instructions, freeing
@@ -21,7 +23,7 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field
 
 # LLMs sometimes write a placeholder string ("None", "N/A", ...) into an optional
 # numeric field instead of omitting it. Coerce those to None so the structured
@@ -35,56 +37,75 @@ def _coerce_optional_float(value):
 
     Three shapes show up in practice: a placeholder string ("None", "N/A") in
     place of an omitted value (#1058); a percentage where a price was asked for
-    ("15%", #1288); and a human-formatted price ("$1,234.50"). A percentage
-    cannot be salvaged into an absolute level -- reading "15%" as 15 would put a
-    stop at $15 on a $600 stock -- so it is dropped like a placeholder, leaving
-    one bad field to null out instead of failing the whole proposal. A formatted
-    price is reduced to its number.
+    ("15%", #1288); and a human-formatted price. A percentage cannot be salvaged
+    into an absolute level, so it is dropped like a placeholder. A formatted
+    price is reduced to its number, reading Vietnamese notation too: "70.500",
+    "70.500 đ", "70.500 VND", "70,5 nghìn" (thousand) all mean 70500.
 
     Anything that is not a single number is dropped the same way. A range
     ("150-160") or a hedge ("around 150") would otherwise reach pydantic, fail
-    validation, and discard the whole decision, losing every field the model got
-    right along with the price.
+    validation, and discard the whole decision.
     """
     if not isinstance(value, str):
         return value
-    text = value.strip()
-    if text.lower() in _NULLISH_FLOAT or text.endswith("%"):
+    text = value.strip().lower()
+    if text in _NULLISH_FLOAT or text.endswith("%"):
         return None
-    cleaned = text.replace(",", "").lstrip("$€£¥").strip()
+    scale = 1.0
+    for word in ("nghìn", "ngàn", "k"):
+        if text.endswith(word):
+            text, scale = text[: -len(word)].strip(), 1000.0
+            break
+    for unit in ("vnd", "vnđ", "đồng", "đ", "₫", "$", "€", "£", "¥"):
+        text = text.replace(unit, "")
+    text = text.strip()
+    if "." in text and "," in text:
+        # Vietnamese "1.234,5" or English "1,234.5": the last separator is the decimal.
+        if text.rfind(",") > text.rfind("."):
+            text = text.replace(".", "").replace(",", ".")
+        else:
+            text = text.replace(",", "")
+    elif "." in text and all(len(part) == 3 for part in text.split(".")[1:]):
+        text = text.replace(".", "")  # 70.500 / 1.234.500: thousands separators
+    elif "," in text and all(len(part) == 3 for part in text.split(",")[1:]):
+        text = text.replace(",", "")  # 70,500: English thousands separator
+    else:
+        text = text.replace(",", ".")  # 70,5: Vietnamese decimal comma
     try:
-        return float(cleaned)
+        return float(text) * scale
     except ValueError:
         return None
 
 
 # ---------------------------------------------------------------------------
-# Shared rating types
+# Shared action type
 # ---------------------------------------------------------------------------
 
 
-class PortfolioRating(StrEnum):
-    """5-tier rating used by the Research Manager and Portfolio Manager."""
+class SystemAction(StrEnum):
+    """The five actions of the quantitative engine (port of lananh-main's policy).
 
-    BUY = "Buy"
-    OVERWEIGHT = "Overweight"
-    HOLD = "Hold"
-    UNDERWEIGHT = "Underweight"
-    SELL = "Sell"
-
-
-class TraderAction(StrEnum):
-    """3-tier transaction direction used by the Trader.
-
-    The Trader's job is to translate the Research Manager's investment plan
-    into a concrete transaction proposal: should the desk execute a Buy, a
-    Sell, or sit on Hold this round.  Position sizing and the nuanced
-    Overweight / Underweight calls happen later at the Portfolio Manager.
+    The engine decides the action; every agent explains it and none may change
+    it. SELL only exits a holding: Vietnamese shares cannot be sold short.
     """
 
-    BUY = "Buy"
-    HOLD = "Hold"
-    SELL = "Sell"
+    BUY = "BUY"
+    HOLD = "HOLD"
+    WATCH = "WATCH"
+    SELL = "SELL"
+    NO_TRADE = "NO_TRADE"
+
+
+# Kept for callers that name the rating type; the scale is now SystemAction.
+PortfolioRating = SystemAction
+
+
+class Stance(StrEnum):
+    """How strongly an agent's reading of the evidence supports the system action."""
+
+    AGREE = "agree"
+    PARTLY_AGREE = "partly_agree"
+    DISAGREE = "disagree"
 
 
 # ---------------------------------------------------------------------------
@@ -93,44 +114,40 @@ class TraderAction(StrEnum):
 
 
 class ResearchPlan(BaseModel):
-    """Structured investment plan produced by the Research Manager.
+    """Structured assessment produced by the Research Manager.
 
-    Hand-off to the Trader: the recommendation pins the directional view,
-    the rationale captures which side of the bull/bear debate carried the
-    argument, and the strategic actions translate that into concrete
-    instructions the trader can execute against.
+    The action is the quantitative engine's; the manager judges how the bull and
+    bear debate bears on it and what the trader must watch. Disagreement is
+    allowed and recorded, but it does not change the action.
     """
 
-    recommendation: PortfolioRating = Field(
+    stance: Stance = Field(
         description=(
-            "The investment recommendation. Exactly one of Buy / Overweight / "
-            "Hold / Underweight / Sell. Conflicting arguments alone are not a "
-            "reason to Hold: commit to the stronger side, sized by how "
-            "decisively it wins. Choose Hold only when the evidence is still "
-            "balanced after weighing, or too thin to support a call."
+            "Whether the debate supports the system action: agree, partly_agree or "
+            "disagree. Disagreeing is allowed and recorded; it does not change the action."
         ),
     )
     rationale: str = Field(
         description=(
-            "Conversational summary of the key points from both sides of the "
-            "debate, ending with which arguments led to the recommendation. "
-            "Speak naturally, as if to a teammate."
+            "Which arguments of the bull and bear sides were strongest and why, "
+            "anchored in specific data from the reports. Speak naturally, as if to a teammate."
         ),
     )
     strategic_actions: str = Field(
         description=(
-            "Concrete steps for the trader to implement the recommendation, "
-            "including sizing guidance relative to a standard allocation. The "
-            "research team does not see the caller's holdings; the trader and "
-            "portfolio manager apply the actual position."
+            "What the trader should monitor while applying the system action: the "
+            "invalidation level and conditions already given, catalysts and dates, "
+            "liquidity and settlement constraints. Use only price levels already given."
         ),
     )
 
 
-def render_research_plan(plan: ResearchPlan) -> str:
-    """Render a ResearchPlan to markdown for storage and the trader's prompt context."""
+def render_research_plan(plan: ResearchPlan, action: str = "NO_TRADE") -> str:
+    """Render a ResearchPlan to markdown, led by the system action it assesses."""
     return "\n".join([
-        f"**Recommendation**: {plan.recommendation.value}",
+        f"**Recommendation**: {action} (hành động của hệ thống định lượng)",
+        "",
+        f"**Stance on the system action**: {plan.stance.value}",
         "",
         f"**Rationale**: {plan.rationale}",
         "",
@@ -144,72 +161,80 @@ def render_research_plan(plan: ResearchPlan) -> str:
 
 
 class TraderProposal(BaseModel):
-    """Structured transaction proposal produced by the Trader.
+    """Structured execution note produced by the Trader.
 
-    The trader reads the Research Manager's investment plan and the analyst
-    reports, then turns them into a concrete transaction: what action to
-    take, the reasoning that justifies it, and the practical levels for
-    entry, stop-loss, and sizing.
+    The action, entry zone, stop, targets and size come from the quantitative
+    engine and are filled in by the node; the trader explains them and plans
+    the execution under Vietnamese market rules.
     """
 
-    action: TraderAction = Field(
-        description="The transaction direction. Exactly one of Buy / Hold / Sell.",
-    )
     reasoning: str = Field(
         description=(
-            "The case for this action, anchored in the analysts' reports and "
+            "The case for the system action, anchored in the analysts' reports and "
             "the research plan. Two to four sentences."
         ),
     )
-    entry_price: float | None = Field(
-        default=None,
+    execution_notes: str = Field(
         description=(
-            "Optional entry price target as an absolute number in the instrument's "
-            "quote currency (e.g. 189.5), never a percentage or a range. Omit it "
-            "if you cannot state a specific level."
+            "How to execute the system plan under Vietnamese market rules: order "
+            "timing (ATO / continuous / ATC), board lots of 100 shares, the price "
+            "band and tick size, T+2 settlement (no exit before the third session), "
+            "liquidity. Use only the price levels already given; if the action has "
+            "no plan, say what would have to change for one."
         ),
     )
-    stop_loss: float | None = Field(
-        default=None,
-        description=(
-            "Optional stop-loss as an absolute price in the instrument's quote "
-            "currency (e.g. 172.0), never a percentage. Convert a percentage "
-            "distance to the price level it implies, or omit it."
-        ),
-    )
-    position_sizing: str | None = Field(
-        default=None,
-        description="Optional sizing guidance, e.g. '5% of portfolio'.",
-    )
-
-    @field_validator("entry_price", "stop_loss", mode="before")
-    @classmethod
-    def _nullish_float_to_none(cls, v):
-        return _coerce_optional_float(v)
 
 
-def render_trader_proposal(proposal: TraderProposal) -> str:
-    """Render a TraderProposal to markdown.
+def _vnd(value) -> str:
+    from tradingagents.quant import report_format as rfmt
 
-    The trailing ``FINAL TRANSACTION PROPOSAL: **BUY/HOLD/SELL**`` line is
-    preserved for backward compatibility with the analyst stop-signal text
-    and any external code that greps for it.
+    return f"{rfmt.fmt_price(value)} VND" if value is not None else "not provided"
+
+
+def plan_lines(decision: dict) -> list[str]:
+    """The engine's trade-plan fields as labelled markdown lines (always all named)."""
+    from tradingagents.quant import report_format as rfmt
+
+    if decision.get("entry_low") is not None:
+        entry = f"{_vnd(decision['entry_low'])} - {_vnd(decision.get('entry_high'))}"
+    else:
+        entry = "not provided"
+    size = decision.get("position_size_pct")
+    sizing = "not provided"
+    if size is not None:
+        sizing = f"{rfmt.fmt_number(size, 1)}% NAV"
+        if decision.get("suggested_shares"):
+            sizing += f" (~{rfmt.fmt_price(decision['suggested_shares'])} cổ phiếu, lô 100)"
+    rr = decision.get("rr_ratio")
+    return [
+        f"**Entry Zone**: {entry}",
+        f"**Stop Loss**: {_vnd(decision.get('stop_price'))}",
+        f"**Target 1**: {_vnd(decision.get('target_price'))}",
+        f"**Target 2**: {_vnd(decision.get('target2'))}",
+        f"**Risk/Reward**: {rfmt.fmt_number(rr) if rr is not None else 'not provided'}",
+        f"**Position Sizing**: {sizing}",
+    ]
+
+
+def render_trader_proposal(proposal: TraderProposal, decision: dict | None = None) -> str:
+    """Render a TraderProposal to markdown with the engine's numbers.
+
+    The trailing ``FINAL TRANSACTION PROPOSAL: **ACTION**`` line is preserved
+    for backward compatibility with code that greps for it.
     """
+    decision = decision or {}
+    action = decision.get("action") or "NO_TRADE"
     parts = [
-        f"**Action**: {proposal.action.value}",
+        f"**Action**: {action} (hành động của hệ thống định lượng)",
         "",
         f"**Reasoning**: {proposal.reasoning}",
-    ]
-    # Named even when absent, so a reader can tell a level the trader chose not
-    # to give from one the schema never asked for.
-    for label, value in (("Entry Price", proposal.entry_price),
-                         ("Stop Loss", proposal.stop_loss),
-                         ("Position Sizing", proposal.position_sizing)):
-        parts.extend(["", f"**{label}**: {value if value is not None and value != '' else 'not provided'}"])
-    parts.extend([
         "",
-        f"FINAL TRANSACTION PROPOSAL: **{proposal.action.value.upper()}**",
-    ])
+        f"**Execution Notes**: {proposal.execution_notes}",
+        "",
+        *plan_lines(decision),
+        "",
+        f"FINAL TRANSACTION PROPOSAL: **{action}**",
+    ]
     return "\n".join(parts)
 
 
@@ -221,70 +246,56 @@ def render_trader_proposal(proposal: TraderProposal) -> str:
 class PortfolioDecision(BaseModel):
     """Structured output produced by the Portfolio Manager.
 
-    The model fills every field as part of its primary LLM call; no separate
-    extraction pass is required. Field descriptions double as the model's
-    output instructions, so the prompt body only needs to convey context and
-    the rating-scale guidance.
+    The rating and price target are the quantitative engine's and are filled in
+    by the node; the manager writes the summary, the thesis and the risks.
     """
 
-    rating: PortfolioRating = Field(
-        description=(
-            "The final position rating. Exactly one of Buy / Overweight / Hold / "
-            "Underweight / Sell, picked based on the analysts' debate. "
-            "Conflicting arguments alone are not a reason to Hold: commit to the "
-            "stronger side, sized by how decisively it wins. Choose Hold only "
-            "when the evidence is still balanced after weighing, or too thin to "
-            "support a call."
-        ),
-    )
     executive_summary: str = Field(
         description=(
-            "A concise action plan covering entry strategy, position sizing, "
-            "key risk levels, and time horizon. Two to four sentences."
+            "A concise statement of the system action and how to act on it: the "
+            "entry, sizing, stop and targets already given, and the time horizon. "
+            "Two to four sentences."
         ),
     )
     investment_thesis: str = Field(
         description=(
-            "Detailed reasoning anchored in specific evidence from the analysts' "
-            "debate. If prior lessons are referenced in the prompt context, "
+            "Detailed reasoning anchored in specific evidence from the analysts and "
+            "the risk debate. If prior lessons are referenced in the prompt context, "
             "incorporate them; otherwise rely solely on the current analysis."
         ),
     )
-    price_target: float | None = Field(
-        default=None,
-        description="Optional target price in the instrument's quote currency.",
+    key_risks: str = Field(
+        description=(
+            "Two or three risks that would make the system's scenario wrong, with "
+            "the invalidation level already given where there is one."
+        ),
     )
     time_horizon: str | None = Field(
         default=None,
-        description="Optional recommended holding period, e.g. '3-6 months'.",
+        description="Optional recommended holding period, e.g. '2-4 tuần'.",
     )
 
-    @field_validator("price_target", mode="before")
-    @classmethod
-    def _nullish_float_to_none(cls, v):
-        return _coerce_optional_float(v)
 
-
-def render_pm_decision(decision: PortfolioDecision) -> str:
-    """Render a PortfolioDecision back to the markdown shape the rest of the system expects.
+def render_pm_decision(decision: PortfolioDecision, system: dict | None = None) -> str:
+    """Render a PortfolioDecision to the markdown shape the rest of the system expects.
 
     Memory log, CLI display, and saved report files all read this markdown,
-    so the rendered output preserves the exact section headers (``**Rating**``,
-    ``**Executive Summary**``, ``**Investment Thesis**``) that downstream
-    parsers and the report writers already handle.
+    so the rendered output keeps the ``**Rating**`` header first.
     """
+    system = system or {}
     parts = [
-        f"**Rating**: {decision.rating.value}",
+        f"**Rating**: {system.get('action') or 'NO_TRADE'}",
         "",
         f"**Executive Summary**: {decision.executive_summary}",
         "",
         f"**Investment Thesis**: {decision.investment_thesis}",
+        "",
+        f"**Key Risks**: {decision.key_risks}",
+        "",
+        f"**Price Target**: {_vnd(system.get('target_price'))}",
+        "",
+        f"**Time Horizon**: {decision.time_horizon or 'not provided'}",
     ]
-    # Named even when absent: a missing line reads as a field nobody asked for,
-    # so a reader cannot tell "no target" from "target not reported".
-    target = decision.price_target if decision.price_target is not None else "not provided"
-    parts.extend(["", f"**Price Target**: {target}"])
-    parts.extend(["", f"**Time Horizon**: {decision.time_horizon or 'not provided'}"])
     return "\n".join(parts)
 
 
@@ -342,16 +353,17 @@ class SentimentReport(BaseModel):
     confidence: Literal["low", "medium", "high"] = Field(
         description=(
             "Confidence in the assessment based on data quality and sample size. "
-            "Use 'low' when one or more sources returned a placeholder or fewer "
-            "than 5 data points; 'medium' when data is present but sparse; "
-            "'high' when all three sources returned substantive data."
+            "Use 'low' when a source was unavailable or there are fewer than 3 "
+            "news items about the company itself; 'medium' when data is present "
+            "but sparse; 'high' when company news, research and the keyword "
+            "baseline all returned substantive data."
         ),
     )
     narrative: str = Field(
         description=(
             "Full sentiment report covering, in order: "
-            "(1) source-by-source breakdown with specific evidence (cite message "
-            "counts, ratios, notable posts); "
+            "(1) source-by-source breakdown with specific evidence (cite dated "
+            "headlines, disclosures and research notes); "
             "(2) cross-source divergences and alignments; "
             "(3) dominant narrative themes; "
             "(4) catalysts and risks surfaced by the data; "

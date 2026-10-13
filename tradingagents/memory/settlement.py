@@ -5,21 +5,18 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
+from tradingagents.dataflows.ohlcv import get_closes
 from tradingagents.dataflows.symbols import normalize_symbol
-from tradingagents.dataflows.vendors.yahoo.market import get_closes
 
 logger = logging.getLogger(__name__)
 
 
 def resolve_benchmark(ticker: str, config: dict) -> str:
-    """Pick the benchmark ticker for alpha calculation against ``ticker``.
+    """Pick the benchmark index for alpha calculation against ``ticker``.
 
-    ``config["benchmark_ticker"]`` overrides everything when set; otherwise
-    the suffix map matches the ticker's exchange suffix (e.g. ``.T`` for
-    Tokyo). US-listed tickers without a dotted suffix fall through to the
-    empty-suffix entry (SPY by default). Unrecognised suffixes, including
-    US tickers with dots like ``BRK.B``, also take the empty-suffix entry.
-    Returns are compared as percentages, each in its own currency.
+    ``config["benchmark_ticker"]`` (VNINDEX by default) is used for every
+    Vietnamese stock; ``benchmark_map`` is kept only for configs that still
+    set one, and its empty-suffix entry is the fallback.
     """
 
     explicit = config.get("benchmark_ticker")
@@ -32,16 +29,15 @@ def resolve_benchmark(ticker: str, config: dict) -> str:
     for suffix, benchmark in benchmark_map.items():
         if suffix and ticker_upper.endswith(suffix.upper()):
             return benchmark
-    return benchmark_map.get("", "SPY")
+    return benchmark_map.get("", "VNINDEX")
 
 
 def _by_day(closes):
     """Closes keyed by the calendar day of their bar, missing closes dropped.
 
-    Yahoo stamps a daily bar at midnight in its market's time zone (UTC for a
-    coin, New York for SPY), so two series meet on their dates, not their
-    instants. A missing or non-positive close is no price at all, not a bar to
-    score on.
+    Daily bars are dated by their session in Vietnam, so two series meet on
+    their dates, not their instants. A missing or non-positive close is no
+    price at all, not a bar to score on.
     """
     closes = closes[closes > 0]
     if getattr(closes.index, "tz", None) is not None:
@@ -51,7 +47,7 @@ def _by_day(closes):
 
 def fetch_returns(
     ticker: str, trade_date: str, holding_days: int = 5,
-    benchmark: str = "SPY",
+    benchmark: str = "VNINDEX",
 ) -> tuple[float | None, float | None, int | None, str | None]:
     """Fetch raw and alpha return for ticker over holding_days from trade_date.
 
@@ -69,7 +65,7 @@ def fetch_returns(
     end = start + timedelta(days=round(holding_days * 7 / 5) + 7)
     end_str = end.strftime("%Y-%m-%d")
 
-    # Closes for the instrument the analysis priced (XAUUSD -> GC=F, #984).
+    # Closes for the instrument the analysis priced.
     stock = _by_day(get_closes(ticker, trade_date, end_str))
     # From a week earlier, so the benchmark has a close on or before entry.
     bench_start = (start - timedelta(days=7)).strftime("%Y-%m-%d")
@@ -83,7 +79,7 @@ def fetch_returns(
     entry, exit_ = stock.index[0], stock.index[holding_days]
     # The window is the stock's own sessions; the benchmark is valued at its
     # last close by each end, so both returns span the same dates even when
-    # the calendars differ (a coin trades at weekends, an index does not).
+    # the stock was suspended for some sessions.
     # It must have traded through the exit, or its close there may yet move.
     if bench.empty or bench.index[0] > entry or bench.index[-1] < exit_:
         return None, None, None, None

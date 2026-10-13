@@ -126,9 +126,10 @@ def build_default_config() -> dict:
         # Checkpoint/resume: when True, LangGraph saves state after each node
         # so a crashed run can resume from the last successful step.
         "checkpoint_enabled": False,
-        # Output language for analyst reports and final decision
-        # Internal agent debate stays in English for reasoning quality
-        "output_language": "English",
+        # Output language for analyst reports and final decision. Vietnamese by
+        # default; the machine-read labels (Rating:, FINAL TRANSACTION PROPOSAL:)
+        # stay in English whatever the language.
+        "output_language": "Vietnamese",
         # Debate and discussion settings
         "max_debate_rounds": 1,
         "max_risk_discuss_rounds": 1,
@@ -144,64 +145,34 @@ def build_default_config() -> dict:
         # Search queries used by get_global_news for macro headlines. Extend or
         # replace to broaden geographic / sector coverage.
         "global_news_queries": [
-            "Federal Reserve interest rates inflation",
-            "S&P 500 earnings GDP economic outlook",
-            "geopolitical risk trade war sanctions",
-            "ECB Bank of England BOJ central bank policy",
-            "oil commodities supply chain energy",
+            "Ngân hàng Nhà nước lãi suất điều hành tỷ giá USD/VND",
+            "VN-Index thanh khoản khối ngoại mua ròng bán ròng",
+            "CPI lạm phát GDP tăng trưởng kinh tế Việt Nam",
+            "FDI xuất khẩu đầu tư công Việt Nam",
+            "nâng hạng thị trường chứng khoán Việt Nam FTSE MSCI",
         ],
         # Data vendor configuration
         # Category-level configuration (default for all tools in category).
         # The configured value is the exact vendor chain — requests are NOT silently
         # routed to vendors you didn't choose. For ordered fallback, list several,
-        # e.g. "yfinance,alpha_vantage". "default" uses all available vendors.
+        # e.g. "dnse,vci". "default" uses all available vendors.
         "data_vendors": {
-            "core_stock_apis": "yfinance",       # Options: alpha_vantage, yfinance
-            "technical_indicators": "yfinance",  # Options: alpha_vantage, yfinance
-            # Statements come from SEC EDGAR as filed (US filers), then Yahoo; the
-        # overview and insider tools, which SEC EDGAR does not serve, from Yahoo.
-        "fundamental_data": "sec_edgar,yfinance",  # Options: sec_edgar, alpha_vantage, yfinance
-            "news_data": "yfinance",             # Options: alpha_vantage, yfinance
-            "macro_data": "fred",                # Options: fred (needs FRED_API_KEY)
-            "prediction_markets": "polymarket",  # Options: polymarket (keyless)
+            "core_stock_apis": "dnse,vci",       # Options: dnse, vci (tried in order)
+            "technical_indicators": "local",     # computed locally on the price sources above
+            "fundamental_data": "vci",           # VCI statements with their publication dates
+            "news_data": "vn_news,google_news",  # company news (VCI, CafeF, Google News); macro news
+            "market_context": "local",           # indices, VNINDEX regime, sector rotation
         },
         # Tool-level configuration (takes precedence over category-level)
         "tool_vendors": {
-            # Example: "get_stock_data": "alpha_vantage",  # Override category default
+            # Example: "get_stock_data": "vci",  # Override category default
         },
-        # Benchmark for alpha calculation in the reflection layer.
-        # ``benchmark_ticker`` (when set) overrides the suffix map for all
-        # tickers; leave it None to use ``benchmark_map`` for auto-detection
-        # based on the ticker's exchange suffix. SPY remains the US default
-        # so the reflection label keeps reading "Alpha vs SPY" for US tickers
-        # while non-US tickers get their regional index automatically.
         # Trading days after the analysis date over which a decision's outcome is
-        # measured, for reflection and for the backtest figures.
+        # measured, for reflection and for the backtest figures. At least 3: a
+        # buy settles T+2 and cannot be sold before the third session.
         "holding_period_days": 5,
-        "benchmark_ticker": None,
-        "benchmark_map": {
-            ".NS":  "^NSEI",       # NSE India (Nifty 50)
-            ".BO":  "^BSESN",      # BSE India (Sensex)
-            ".T":   "^N225",       # Tokyo (Nikkei 225)
-            ".TW":  "^TWII",       # Taiwan (TAIEX)
-            ".TWO": "^TWII",       # Taipei OTC (TPEx has no Yahoo index; TAIEX)
-            ".KS":  "^KS11",       # Korea (KOSPI)
-            ".KQ":  "^KQ11",       # Korea (KOSDAQ)
-            ".HK":  "^HSI",        # Hong Kong (Hang Seng)
-            ".SI":  "^STI",        # Singapore (Straits Times)
-            ".L":   "^FTSE",       # London (FTSE 100)
-            ".DE":  "^GDAXI",      # Germany (DAX)
-            ".PA":  "^FCHI",       # Paris (CAC 40)
-            ".AS":  "^AEX",        # Amsterdam (AEX)
-            ".SW":  "^SSMI",       # Switzerland (SMI)
-            ".MI":  "FTSEMIB.MI",  # Milan (FTSE MIB)
-            ".TO":  "^GSPTSE",     # Toronto (TSX Composite)
-            ".AX":  "^AXJO",       # Australia (ASX 200)
-            ".SS":  "000001.SS",   # Shanghai (SSE Composite)
-            ".SZ":  "399001.SZ",   # Shenzhen (SZSE Component)
-            ".SA":  "^BVSP",       # B3 Brazil (Ibovespa)
-            "":     "SPY",         # default for US-listed tickers (no suffix)
-        },
+        # Benchmark for alpha in the reflection layer and the backtest.
+        "benchmark_ticker": "VNINDEX",
 
     })
 

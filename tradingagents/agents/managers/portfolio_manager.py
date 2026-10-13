@@ -1,23 +1,25 @@
-"""Portfolio Manager: synthesises the risk-analyst debate into the final decision.
+"""Portfolio Manager: writes the final decision around the system action.
 
 Uses LangChain's ``with_structured_output`` so the LLM produces a typed
-``PortfolioDecision`` directly, in a single call. Its rating is the run's
-``final_rating``, and the decision is rendered to markdown as
+``PortfolioDecision`` directly, in a single call. The rating and price target
+are the quantitative engine's, never the model's: ``final_rating`` is the
+engine's action, and the decision is rendered to markdown as
 ``final_trade_decision`` for the memory log, CLI display and saved reports.
 When a provider does not expose structured output, the agent falls back to
-free-text generation and the rating is read from that text.
+free-text generation under the engine's rating line.
 """
 
 from __future__ import annotations
 
+from tradingagents.agents import vn_context
 from tradingagents.agents.context import (
     get_instrument_context_from_state,
     get_language_instruction,
     get_portfolio_context_from_state,
 )
-from tradingagents.agents.rating import parse_rating
 from tradingagents.agents.schemas import PortfolioDecision, render_pm_decision
 from tradingagents.agents.structured import NO_EXTERNAL_TOOLS, bind_structured, invoke_structured
+from tradingagents.quant import report_format as rfmt
 
 
 def create_portfolio_manager(llm):
@@ -31,6 +33,8 @@ def create_portfolio_manager(llm):
         risk_debate_state = state["risk_debate_state"]
         research_plan = state["investment_plan"]
         trader_plan = state["trader_investment_plan"]
+        decision = vn_context.quant_decision(state)
+        action = vn_context.action_of(state)
 
         past_context = state.get("past_context", "")
         lessons_line = (
@@ -39,51 +43,53 @@ def create_portfolio_manager(llm):
             else ""
         )
 
-        prompt = f"""As the Portfolio Manager, synthesize the risk analysts' debate and deliver the final trading decision.
+        prompt = f"""As the Portfolio Manager, write the final decision on this Vietnamese stock for the investor.
 
 {instrument_context}
 
 {portfolio_context}
 
+{vn_context.quant_block(state)}
+
 ---
 
-**Rating Scale** (use exactly one):
-- **Buy**: Strong conviction to enter or add to position
-- **Overweight**: Favorable outlook, gradually increase exposure
-- **Hold**: Maintain current position, no action needed
-- **Underweight**: Reduce exposure, take partial profits
-- **Sell**: Exit position or avoid entry
+The action {action} and every number of the plan are fixed by the quantitative system; you explain them, you do not choose them. Ground every statement in specific evidence from the analysts and the risk debate. Where the debate disagrees with the system, say so plainly as a risk - do not soften it and do not change the action.
 
 **Context:**
-- Research Manager's investment plan: **{research_plan}**
-- Trader's transaction proposal: **{trader_plan}**
+- Research Manager's assessment: **{research_plan}**
+- Trader's execution plan: **{trader_plan}**
 {lessons_line}
 **Risk Analysts Debate History:**
 {history}
 
 ---
 
-Ground every conclusion in specific evidence from the analysts. The risk debate always contains conflicting stances; deciding which is stronger is the job, so conflict alone is not a reason to Hold. Commit to the stronger case, sized by how decisively it wins. Choose Hold only when the evidence is still balanced after that weighing, or too thin to support a call; do not force a direction to appear decisive. Weigh the analysts on their merits, independent of speaking order.
-
 ## Output
 
-Write these sections, in this order, starting with the rating on its own line:
+- **Executive Summary**: the system action and how to act on it, with the entry, sizing, stop and targets already given (or, for a non-BUY action, why there is none)
+- **Investment Thesis**: the evidence that supports or strains the action, and what would change it
+- **Key Risks**: two or three risks that would make the scenario wrong, with the invalidation level already given
+- **Time Horizon**: optional
 
-- **Rating**: exactly one of Buy / Overweight / Hold / Underweight / Sell
-- **Executive Summary**: the call and how to act on it
-- **Investment Thesis**: the evidence that decided it, and what would change it
+{vn_context.NO_INVENT_RULE}
+
+{vn_context.GROUNDING_RULES}
 
 {NO_EXTERNAL_TOOLS}{get_language_instruction()}"""
 
-        # The typed rating is the decision; the rendered text only carries it.
-        # Read back from text, a rating the thesis quotes could replace it.
-        decision = invoke_structured(structured_llm, prompt, "Portfolio Manager")
-        if decision is not None:
-            final_trade_decision = render_pm_decision(decision)
-            final_rating = decision.rating.value
+        result = invoke_structured(structured_llm, prompt, "Portfolio Manager")
+        if result is not None:
+            final_trade_decision = render_pm_decision(result, decision)
         else:
-            final_trade_decision = llm.invoke(prompt).content
-            final_rating = parse_rating(final_trade_decision)
+            prose = llm.invoke(prompt).content
+            target = decision.get("target_price")
+            final_trade_decision = "\n".join([
+                f"**Rating**: {action}",
+                "",
+                prose,
+                "",
+                f"**Price Target**: {rfmt.fmt_price(target) + ' VND' if target is not None else 'not provided'}",
+            ])
 
         new_risk_debate_state = {
             "history": risk_debate_state["history"],
@@ -100,7 +106,7 @@ Write these sections, in this order, starting with the rating on its own line:
         return {
             "risk_debate_state": new_risk_debate_state,
             "final_trade_decision": final_trade_decision,
-            "final_rating": final_rating,
+            "final_rating": action,
         }
 
     return portfolio_manager_node

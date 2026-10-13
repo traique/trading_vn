@@ -11,5 +11,5 @@ class AnalystType(StrEnum):
 
 
 class AssetType(StrEnum):
+    # Only Vietnamese stocks are analysed; the type is kept for the run signature.
     STOCK = "stock"
-    CRYPTO = "crypto"

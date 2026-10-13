@@ -6,6 +6,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Changes that need action when upgrading are listed under "Upgrading from" in their release.
 
+## [Unreleased] — Vietnamese market edition
+
+The framework analyses Vietnamese stocks (HOSE, HNX, UPCoM) only, on Vietnamese data, and a deterministic quantitative engine decides the action that the agents explain.
+
+### Added
+
+- **Vietnamese data sources.** Daily prices from DNSE with VCI as fallback (VND, adjusted for corporate actions); statements with their publication dates, TTM ratios, corporate events and company disclosures from VCI; broker research from CafeF; news from Google News in Vietnamese. No key needed.
+- **Quant Engine.** A graph step beside the analysts, ported from the lananh-main policy layer, decides BUY / HOLD / WATCH / SELL / NO_TRADE with the entry zone, stop, targets, risk/reward and position size, from price, VNINDEX regime, sector and news. Every later agent reads it as fixed.
+- **Output Guard.** A last graph step checks the Research Manager, Trader and Portfolio Manager texts in code: a contradicting action is replaced by the system summary, a price that is in no data is flagged, the final rating is always the engine's, and one standard disclaimer ends the decision.
+- **Market rules** in `tradingagents/market/vn_rules.py`: price bands, tick sizes, board lots, T+2 settlement, sessions and round-trip costs. The trade plan rounds to the tick, sizes in lots of 100 when cash is given, and the backtest scores BUY net of costs.
+- Tools `get_corporate_events` and `get_market_context` (indices, VNINDEX regime, sector rotation).
+
+### Changed
+
+- The rating scale is the engine's five actions; the Research Manager states its stance on the action, the Trader writes the execution notes, the Portfolio Manager writes the thesis and risks.
+- Reports are in Vietnamese by default; the benchmark is VNINDEX; tickers accept `FPT`, `FPT.VN`, `HOSE:FPT`.
+
+### Removed
+
+- Yahoo Finance, Alpha Vantage, SEC EDGAR, FRED, Polymarket, Reddit, StockTwits and Jev screening, the crypto pipeline, and the `yfinance` and `pytz` dependencies.
+
+### Upgrading from 0.6.0
+
+- `data_vendors` values are now `dnse`, `vci`, `local`, `vn_news`, `google_news`; old vendor names are refused.
+- `PortfolioRating` is an alias of `SystemAction`; `TraderAction` is gone. Memory-log entries written with the old five-tier ratings still parse only when their label is Buy, Hold or Sell.
+
 ## [0.6.0] — 2026-10-03
 
 HTML reports, a provider per model tier, past decisions settled for every ticker while the analysts work, and company news read while Yahoo's news feed is down.

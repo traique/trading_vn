@@ -38,16 +38,14 @@ class Reflector:
         final_decision: str,
         raw_return: float,
         alpha_return: float,
-        benchmark_name: str = "SPY",
+        benchmark_name: str = "VNINDEX",
         holding_days: int = 5,
     ) -> str:
         """Single reflection call on the final trade decision with outcome context.
 
         Used when a pending decision is settled. The final_trade_decision already
         synthesises all analyst insights, so no separate market context is needed.
-        ``benchmark_name`` is the label used for the alpha line (e.g. ``"SPY"``
-        for US tickers, ``"^N225"`` for ``.T`` listings); defaults to SPY for
-        callers that haven't been updated to thread the benchmark through.
+        ``benchmark_name`` is the label used for the alpha line; VNINDEX by default.
         """
         messages = [
             ("system", self._system_prompt(holding_days)),

@@ -30,7 +30,7 @@ def test_record_decision_appends_a_pending_entry(tmp_path):
     graph = _bare_graph(tmp_path)
     graph.record_decision("NVDA", "2026-01-10", {"final_trade_decision": "Rating: Buy\n\nBuy NVDA."})
     entries = graph.memory_log.load_entries()
-    assert [(e["ticker"], e["pending"], e["rating"]) for e in entries] == [("NVDA", True, "Buy")]
+    assert [(e["ticker"], e["pending"], e["rating"]) for e in entries] == [("NVDA", True, "BUY")]
 
 
 @pytest.mark.unit
@@ -77,7 +77,7 @@ class _FakeGraph:
 
     def stream_run(self, graph_input, **kwargs):
         yield [], {"messages": [], "market_report": "M"}
-        yield [], {"messages": [], "final_trade_decision": "Rating: Buy\n\nBuy NVDA.", "final_rating": "Buy"}
+        yield [], {"messages": [], "final_trade_decision": "Rating: Buy\n\nBuy NVDA.", "final_rating": "BUY"}
 
 
 class _NullLive:

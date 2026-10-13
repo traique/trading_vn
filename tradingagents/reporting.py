@@ -43,11 +43,16 @@ def _header(ticker: str, final_state: dict, settings: dict | None) -> str:
             lines.append("- Data vendors: " + ", ".join(f"{k} {v}" for k, v in vendors.items()))
     if final_state.get("memory_note"):
         lines.append(f"- Memory log: {final_state['memory_note']}")
+    if final_state.get("guard_notes"):
+        lines.append("- Output Guard: " + "; ".join(final_state["guard_notes"].splitlines()))
     return "\n".join(lines) + "\n\n"
 
 
 # The report's sections in order: (heading, folder, [(agent, file, state path)]).
 _SECTIONS = (
+    ("0. Quantitative System Decision", "0_quant", (
+        ("Quant Engine", "quant.md", ("quant_report",)),
+    )),
     ("I. Analyst Team Reports", "1_analysts", (
         ("Market Analyst", "market.md", ("market_report",)),
         ("Sentiment Analyst", "sentiment.md", ("sentiment_report",)),

@@ -1,5 +1,5 @@
 """OpenRouter model selection: prompts are labeled by mode (#1000); required
-prompts exit cleanly on cancel; the output-language prompt defaults to English
+prompts exit cleanly on cancel; the output-language prompt defaults to Vietnamese
 on cancel; and the OpenRouter list is newest-first."""
 
 from unittest import mock
@@ -111,12 +111,12 @@ class TestCancelExitsCleanly:
 
 
 @pytest.mark.unit
-class TestLanguageDefaultsToEnglish:
-    def test_select_cancel_defaults_english(self):
+class TestLanguageDefaultsToVietnamese:
+    def test_select_cancel_defaults_vietnamese(self):
         with mock.patch.object(prompts.questionary, "select", return_value=_asks(None)):
-            assert prompts.ask_output_language() == "English"
+            assert prompts.ask_output_language() == "Vietnamese"
 
-    def test_custom_language_cancel_defaults_english(self):
+    def test_custom_language_cancel_defaults_vietnamese(self):
         with mock.patch.object(prompts.questionary, "select", return_value=_asks("custom")), \
              mock.patch.object(prompts.questionary, "text", return_value=_asks(None)):
-            assert prompts.ask_output_language() == "English"
+            assert prompts.ask_output_language() == "Vietnamese"

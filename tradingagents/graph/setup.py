@@ -21,6 +21,8 @@ from tradingagents.agents import (
     create_trader,
 )
 from tradingagents.agents.analysts.turn import WRAP_UP
+from tradingagents.agents.output_guard import create_output_guard
+from tradingagents.agents.quant_engine import create_quant_engine
 from tradingagents.agents.state import AgentState
 
 from .analyst_execution import build_analyst_execution_plan
@@ -153,11 +155,16 @@ class GraphSetup:
         workflow.add_node("Neutral Analyst", neutral_analyst)
         workflow.add_node("Conservative Analyst", conservative_analyst)
         workflow.add_node("Portfolio Manager", portfolio_manager_node)
+        workflow.add_node("Output Guard", create_output_guard())
 
         # The analysts work at the same time; the research debate starts once
         # every one of them has filed its report. The memory log settles past
         # decisions alongside them: only the Portfolio Manager reads its lessons.
+        # The quantitative engine decides the action alongside them too, so
+        # every agent from the debate on reads the decision it must explain.
         first_steps = [spec.agent_node for spec in plan.specs]
+        workflow.add_node("Quant Engine", create_quant_engine())
+        first_steps.append("Quant Engine")
         if memory_node is not None:
             workflow.add_node("Memory Log", memory_node)
             first_steps.append("Memory Log")
@@ -182,6 +189,7 @@ class GraphSetup:
                 RISK_ANALYSIS_PATH_MAP,
             )
 
-        workflow.add_edge("Portfolio Manager", END)
+        workflow.add_edge("Portfolio Manager", "Output Guard")
+        workflow.add_edge("Output Guard", END)
 
         return workflow
