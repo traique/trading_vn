@@ -378,7 +378,17 @@ class TestResearchManagerAgent:
         llm.invoke.return_value = MagicMock(content=plain_response)
         rm = create_research_manager(llm)
         result = rm(_make_rm_state())
-        assert result["investment_plan"] == plain_response
+        plan = result["investment_plan"]
+        # The model's prose is kept, under the engine's action line.
+        assert plan.startswith("**Recommendation**: WATCH")
+        assert plan.endswith(plain_response)
+
+    def test_a_freetext_rating_never_replaces_the_system_action(self):
+        llm = MagicMock()
+        llm.with_structured_output.side_effect = NotImplementedError("provider unsupported")
+        llm.invoke.return_value = MagicMock(content="**Rating**: Hold\n\nBalanced debate.")
+        result = create_research_manager(llm)(_make_rm_state("NO_TRADE"))
+        assert result["investment_plan"].splitlines()[0].startswith("**Recommendation**: NO_TRADE")
 
 
 # ---------------------------------------------------------------------------

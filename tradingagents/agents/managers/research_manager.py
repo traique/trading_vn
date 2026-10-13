@@ -13,7 +13,7 @@ from tradingagents.agents.schemas import ResearchPlan, render_research_plan
 from tradingagents.agents.structured import (
     NO_EXTERNAL_TOOLS,
     bind_structured,
-    invoke_structured_or_freetext,
+    invoke_structured,
 )
 
 
@@ -56,13 +56,16 @@ Write these sections, in this order:
 
 {NO_EXTERNAL_TOOLS}""" + get_language_instruction()
 
-        investment_plan = invoke_structured_or_freetext(
-            structured_llm,
-            llm,
-            prompt,
-            lambda plan: render_research_plan(plan, action),
-            "Research Manager",
-        )
+        result = invoke_structured(structured_llm, prompt, "Research Manager")
+        if result is not None:
+            investment_plan = render_research_plan(result, action)
+        else:
+            # Free text keeps the model's prose, but the action line is always
+            # the engine's, as in the Trader and Portfolio Manager fallbacks.
+            prose = llm.invoke(prompt).content
+            investment_plan = (
+                f"**Recommendation**: {action} (hành động của hệ thống định lượng)\n\n{prose}"
+            )
 
         new_investment_debate_state = {
             "history": investment_debate_state.get("history", ""),

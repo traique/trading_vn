@@ -39,7 +39,7 @@ def make_log(tmp_path, filename="trading_memory.md"):
 def _seed_completed(tmp_path, ticker, date, decision_text, reflection_text, filename="trading_memory.md"):
     """Write a completed entry directly to file, bypassing the API."""
     entry = (
-        f"[{date} | {ticker} | Buy | +1.0% | +0.5% | 5d]\n\n"
+        f"[{date} | {ticker} | BUY | +1.0% | +0.5% | 5d]\n\n"
         f"DECISION:\n{decision_text}\n\n"
         f"REFLECTION:\n{reflection_text}"
         + _SEP
@@ -296,14 +296,14 @@ class TestTradingMemoryLogCore:
 
     def test_get_past_context_same_ticker(self, tmp_path):
         log = make_log(tmp_path)
-        _seed_completed(tmp_path, "FPT", "2026-01-05", "Buy FPT — AI capex thesis intact.", "Directionally correct.")
+        _seed_completed(tmp_path, "FPT", "2026-01-05", "Buy FPT — mảng công nghệ tăng trưởng.", "Directionally correct.")
         ctx = log.get_past_context("FPT")
         assert "Past analyses of FPT" in ctx
         assert "Buy FPT" in ctx
 
     def test_get_past_context_cross_ticker(self, tmp_path):
         log = make_log(tmp_path)
-        _seed_completed(tmp_path, "HPG", "2026-01-05", "Buy HPG — Services growth.", "Correct.")
+        _seed_completed(tmp_path, "HPG", "2026-01-05", "Buy HPG — giá thép hồi phục.", "Correct.")
         ctx = log.get_past_context("FPT")
         assert "Recent cross-ticker lessons" in ctx
         assert "Past analyses of FPT" not in ctx
