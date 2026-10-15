@@ -225,3 +225,8 @@ reports/
 # TradingAgents VN runtime data (books, cache, reports, calibration)
 data/
 results/
+
+# Research harness (research/): downloaded data and run outputs, never committed
+research/data/
+research/out/
+research/runs/

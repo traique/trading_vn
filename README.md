@@ -154,6 +154,8 @@ CAGR / sụt giảm tối đa (Sharpe):
 - **Tiền nhàn rỗi:** chiến lược đứng ngoài 20–45% thời gian. Gửi phần tiền mặt vào tiền gửi/quỹ thị trường tiền tệ ~4%/năm cộng thêm khoảng 0,9–2,1 điểm/năm (cả kỳ 17,1%).
 - **Trạng thái ngày 14/10/2026:** VNINDEX 1.704,9 dưới MA200 1.797,9 nên rổ đang **toàn tiền mặt** (từ phiên xét 25/09/2026), đang trong đợt sụt −20,8% bắt đầu 03/02/2026. Bot sẽ đứng ngoài tới khi một phiên cuối tuần đóng cửa trên MA200.
 
+Toàn bộ bảng so sánh, các phép thử độ bền và giới hạn của kết luận: [research/RESULTS.md](research/RESULTS.md); tự chạy lại bằng bộ khung trong [research/](research/README.md).
+
 Quant Engine không phải ứng viên trong đợt kiểm định này. Chạy lại theo luật khớp lệnh mới trên rổ VN30 hiện tại (không có dữ liệu dòng tiền), giai đoạn VALID 2021–2023 nó được −1,6%/năm, sụt giảm tối đa −4,7%, gần như luôn đứng ngoài (trung bình 2% vốn). Con số +2,2% báo trước đây được đo trước khi sửa luật T+2 và trượt giá.
 
 ### Mỗi ngày giao dịch, sau giờ đóng cửa (`TRADE_TIME`, không sớm hơn 15:05)
@@ -368,6 +370,7 @@ main_botkeep.py   điểm khởi động ứng dụng luôn bật
 deploy/botkeep/   requirements, .env.example, hướng dẫn Botkeep
 scripts/          build_botkeep_bundle.py (gói upload Botkeep)
 tests/            ~1200 test, không cần mạng hay key
+research/         bộ khung backtest nghiên cứu (không nằm trong gói Botkeep): research/README.md
 ```
 
 ## Phát triển và kiểm thử
@@ -379,6 +382,13 @@ ruff check .
 ```
 
 Test không gọi mạng hay AI: dữ liệu và model đều được giả lập. CI chạy trên Python 3.11–3.14. Lịch sử thay đổi xem ở [CHANGELOG.md](CHANGELOG.md).
+
+**Bộ khung backtest nghiên cứu** (`research/`, nằm ngoài gói Botkeep): tải dữ liệu lịch sử 2011–nay của mọi mã từng niêm yết HOSE, chạy lại hoặc mở rộng nghiên cứu trên đúng sổ lệnh của bot, với các giai đoạn TRAIN/VALID/TEST cố định và TEST bị khoá. Hướng dẫn: [research/README.md](research/README.md). Kết quả kiểm định ngày 15/10/2026 (vì sao chọn Phòng thủ): [research/RESULTS.md](research/RESULTS.md).
+
+```bash
+python -m research download                 # lần đầu ~20 phút, ~320 MB (không commit)
+python -m research run factor --split VALID # CAGR 13,86% / sụt giảm tối đa −12,0%
+```
 
 ## Giới hạn cần biết
 
