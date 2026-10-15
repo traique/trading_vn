@@ -93,9 +93,9 @@ Botkeep tự đặt `SERVER_PORT`; chạy nơi khác thì dùng `PORT` (mặc đ
 | `/danhmuc` | Danh mục cả hai tài khoản ảo (và tài khoản thật ở chế độ `signal`) |
 | `/lenh` | Lệnh bot đặt cho phiên tới |
 | `/hieuchinh` | Ngưỡng Quant Engine đang dùng và kết quả tự hiệu chỉnh 5 đêm gần nhất |
-| `/chay` | Chạy ngay phiên đã đóng gần nhất cho bot (dùng khi server khởi động lại lỡ giờ báo cáo; phiên đã chạy thì bỏ qua) |
+| `/chay` | Chạy ngay (kèm chạy bù) các phiên đã đóng mà bot chưa xử lý; phiên đã chạy thì bỏ qua. Trước 15:05 chỉ tính tới phiên hôm trước |
 | `/von 500000000` | Đặt tiền mặt tài khoản thật (chế độ `signal`) |
-| `/khop mua FPT 100 56300` | Báo đã khớp lệnh thật; bán: `/khop ban FPT 100 58000` (chế độ `signal`) |
+| `/khop mua FPT 100 56300 [YYYY-MM-DD]` | Báo đã khớp lệnh thật (ngày mặc định hôm nay); bán: `/khop ban FPT 100 58000` (chế độ `signal`). Bot từ chối lệnh không thể xảy ra: không đủ tiền, bán cổ phiếu chưa về (mua phiên T bán được từ chiều T+2), ngày tương lai/cuối tuần, hoặc ngày trước lệnh đã ghi gần nhất |
 | `/id` | Telegram id của bạn |
 
 Mã nhận được các dạng `FPT`, `fpt`, `FPT.VN`, `HOSE:FPT`. Chỉ số (`VNINDEX`, `VN30`...) không có quyết định giao dịch nên bị từ chối.
@@ -111,13 +111,15 @@ Mã nhận được các dạng `FPT`, `fpt`, `FPT.VN`, `HOSE:FPT`. Chỉ số (
 
 ### Báo cáo tự động
 
-Mỗi ngày thứ Hai - thứ Sáu, lúc `DAILY_REPORT_TIME` (giờ Việt Nam, mặc định 15:30), server lần lượt chạy ba việc:
+Hai lịch chạy độc lập (giờ Việt Nam):
 
-1. **Bot giao dịch** (nếu `TRADE_MODE` khác `off`): khớp phiên hôm nay, ra quyết định, đặt lệnh cho phiên mai cho cả hai chiến lược, gửi báo cáo 🤖 Quant Engine, 🚀 Động lượng và 📊 so sánh qua Telegram.
-2. **Phân tích đầy đủ bằng AI** cho từng mã trong watchlist, gửi qua Telegram.
-3. **Tự hiệu chỉnh** (nếu `AUTO_CALIBRATE=1`), gửi kết quả ⚙️.
+1. **Bot giao dịch** (nếu `TRADE_MODE` khác `off`), mỗi ngày lúc `TRADE_TIME` (mặc định = `DAILY_REPORT_TIME` nếu sau 15:05, ngược lại 15:30; **không bao giờ trước 15:05**, khi nến ngày mới chốt): khớp các phiên chưa xử lý, ra quyết định, đặt lệnh cho phiên tới cho cả hai chiến lược, gửi báo cáo 🤖 Quant Engine, 🚀 Động lượng và 📊 so sánh qua Telegram. Sau đó **tự hiệu chỉnh** (nếu `AUTO_CALIBRATE=1`) trên phiên vừa xử lý, gửi kết quả ⚙️.
+2. **Phân tích đầy đủ bằng AI** cho từng mã trong watchlist, thứ Hai - thứ Sáu lúc `DAILY_REPORT_TIME` (có thể đặt buổi sáng; trước giờ đóng cửa phân tích dùng phiên đã đóng gần nhất).
 
-Ngày lễ (VNINDEX không có phiên) được bỏ qua; nếu không đọc được dữ liệu, server thử lại sau 10 phút. Nên đặt giờ sau 15:30 để có giá đóng cửa và dữ liệu khối ngoại trong ngày.
+- **Ngày lễ:** bot giao dịch chỉ xử lý những phiên VNINDEX thực sự có nến, nên ngày lễ tự bỏ qua; phân tích watchlist cũng bỏ qua ngày lễ khi chạy sau 15:05.
+- **Chạy bù:** mỗi lần chạy (kể cả lúc server khởi động), bot xử lý lần lượt mọi phiên bị lỡ từ phiên cuối đã xử lý, mỗi phiên chỉ dùng dữ liệu tới phiên đó. Bù tối đa 20 phiên; phiên cũ hơn bị bỏ qua và lệnh chờ của chúng bị huỷ (báo cáo có ghi).
+- **Lỗi dữ liệu:** bot thử lại sau 10, 20, 40, 60... phút (tối đa 6 lần/ngày), báo Telegram một lần; phiên chưa xử lý được chạy bù lần sau.
+- **Không chạy trùng:** mỗi tài khoản ảo ghi lại phiên cuối đã xử lý; chạy lại (lịch, `/chay`, nút web) không khớp/đặt lệnh hai lần. Các file trạng thái được ghi nguyên tử.
 
 ### Bot giao dịch
 
@@ -172,7 +174,8 @@ Mỗi lượt gọi AI đi theo `PROVIDER_ORDER` (mặc định `router9,groq,op
 | `PUBLIC_URL` | - | Địa chỉ web, để bot gửi link báo cáo |
 | `SERVER_PORT` / `PORT` | 8080 | Cổng web |
 | `WATCHLIST` | - | Watchlist ban đầu (chỉ dùng lần chạy đầu) |
-| `DAILY_REPORT_TIME` | `15:30` | Giờ báo cáo tự động (HH:MM, giờ VN) |
+| `DAILY_REPORT_TIME` | `15:30` | Giờ phân tích watchlist tự động (HH:MM, giờ VN) |
+| `TRADE_TIME` | `DAILY_REPORT_TIME` nếu ≥ 15:05, ngược lại `15:30` | Giờ bot giao dịch + hiệu chỉnh chạy (HH:MM, giờ VN); giá trị trước 15:05 được nâng lên 15:05 |
 | `MAX_PENDING` | 10 | Số lượt chờ tối đa từ web/Telegram |
 | `TRADE_MODE` | `paper` | `paper` / `signal` / `off` |
 | `PAPER_CAPITAL` | 1.000.000.000 | Vốn tài khoản ảo (VND) |
@@ -197,9 +200,10 @@ Mỗi lượt gọi AI đi theo `PROVIDER_ORDER` (mặc định `router9,groq,op
 | Bot trả "Bot chưa cho phép tài khoản này" | Thêm id vào `TELEGRAM_ALLOWED_IDS`, khởi động lại |
 | `Every LLM provider failed` | Xem `/trangthai`; kiểm tra key, quota, thêm nhà cung cấp dự phòng |
 | `/nhanh` báo lỗi kết nối | DNSE/VCI không truy cập được từ host |
-| Không có báo cáo hằng ngày | Kiểm tra watchlist, `DAILY_REPORT_TIME`, ngày lễ, và log `Daily run` |
+| Không có báo cáo hằng ngày | Kiểm tra watchlist, `DAILY_REPORT_TIME`, `TRADE_TIME`, ngày lễ, và log `Daily run` / `Trading run` |
+| `/khop` báo sổ tài khoản thật bị hỏng | File `real.json` hỏng đã được chuyển sang `real.json.corrupt-...` (không xoá). Đổi tên lại thành `real.json` sau khi sửa, hoặc xoá file đó để bắt đầu sổ mới |
 | Link báo cáo trong Telegram thiếu | Đặt `PUBLIC_URL` |
-| `/hieuchinh` báo "chưa chạy" | Hiệu chỉnh chạy sau phiên đầu tiên lúc `DAILY_REPORT_TIME`; cần đủ 80 phiên lịch sử |
+| `/hieuchinh` báo "chưa chạy" | Hiệu chỉnh chạy sau phiên đầu tiên lúc `TRADE_TIME`; cần đủ 80 phiên lịch sử |
 | Bot không đặt lệnh nhiều ngày | Bình thường khi VNINDEX risk-off; xem lý do bằng `/nhanh MÃ` |
 
 > Thông tin chỉ mang tính tham khảo, không phải khuyến nghị đầu tư.

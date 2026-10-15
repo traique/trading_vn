@@ -18,6 +18,7 @@ sẵn. Đây là nơi DUY NHẤT quyết định action; Gemini ở stock_analys
            khảo, tự nó KHÔNG đủ điều kiện BUY.
 """
 
+import math
 from dataclasses import dataclass, field
 
 from tradingagents.market import vn_rules
@@ -78,6 +79,18 @@ class TradePlan:
     plan_note: str  # quy tắc: chốt 1/2 tại T1, dời stop về hoà vốn
 
 
+def _target_at_or_below(level: float, exchange: str | None = None) -> float:
+    """The highest valid order price at or below a resistance ``level``.
+
+    Key levels are cluster averages on a 10đ grid, usually off the order tick
+    grid; rounding to the NEAREST tick could put a sell target one tick above
+    the level it aims at, which a touch-and-turn session never fills (and
+    overstates R:R).
+    """
+    tick = vn_rules.tick_size(level, exchange)
+    return float(math.floor(level / tick + 1e-9) * tick)
+
+
 def build_trade_plan(
     price: float,
     stop: float,
@@ -120,16 +133,12 @@ def build_trade_plan(
 
     resistances = key_levels.resistances if key_levels else []
     target1 = target_price
+    # T1 sits at or below its own level, so that level is skipped by
+    # comparing the tick-floored prices, not the raw ones.
     target2 = next(
-        (
-            feat.round_order_price(lv.price, exchange)
-            for lv in resistances
-            if lv.price > target_price
-        ),
+        (t for t in (_target_at_or_below(lv.price, exchange) for lv in resistances) if t > target1),
         None,
     )
-    if target2 is not None and target2 <= target1:
-        target2 = None
 
     return TradePlan(
         entry_low=entry_low,
@@ -428,6 +437,28 @@ def _detect_setup(
     return "none", 0.35, reasons
 
 
+_NEUTRAL_SETUP_STRENGTH = 0.35  # what "none" scores: no setup either way
+
+
+def _directional_setup_strength(setup_type: str, strength: float, bias: _Bias) -> float:
+    """Setup strength as evidence FOR the bias direction.
+
+    _detect_setup scores a setup's own quality, not which way it points: an
+    oversold mean reversion or an upside breakout under a bearish bias argue
+    AGAINST selling, and a breakdown under a bullish bias argues against
+    buying. Feeding the raw strength into _compute_confidence let those
+    opposing setups add confidence (a held stock dumped at an oversold low).
+    An opposing setup counts no more than having no setup at all.
+    """
+    if bias.direction == "bearish":
+        return strength if setup_type == "breakdown" else min(strength, _NEUTRAL_SETUP_STRENGTH)
+    # Every other bias scores agreement/trend the bullish way (see
+    # _compute_confidence), so only a breakdown opposes it.
+    if setup_type == "breakdown":
+        return min(strength, _NEUTRAL_SETUP_STRENGTH)
+    return strength
+
+
 _REGIME_DOWN = {"risk_on": "neutral", "neutral": "risk_off"}
 
 
@@ -675,11 +706,11 @@ def _compute_stop_target(
             # A nearer level that leaves too little room is expected to be
             # tested, not to cap the move: aim at the first one that pays.
             for level in _resistances(price, support_resistance, key_levels):
-                if (feat.round_order_price(level, exchange) - entry_high) / risk >= params.min_rr_ratio:
+                if (_target_at_or_below(level, exchange) - entry_high) / risk >= params.min_rr_ratio:
                     resistance = level
                     break
         if resistance is not None:
-            target = feat.round_order_price(resistance, exchange)
+            target = _target_at_or_below(resistance, exchange)
             basis = f"{basis}+resistance"
         else:
             target = feat.round_order_price(entry_high + risk * reward_mult, exchange)
@@ -830,7 +861,9 @@ def evaluate_policy(inputs: PolicyInputs) -> Decision:
     bias = _classify_bias(inputs)
     setup_type, setup_strength, setup_reasons = _detect_setup(inputs, bias, session_flags)
     flow_score, flow_reasons = _flow_score(inputs)
-    confidence = _compute_confidence(inputs, bias, setup_strength, regime, flow_score)
+    confidence = _compute_confidence(
+        inputs, bias, _directional_setup_strength(setup_type, setup_strength, bias), regime, flow_score
+    )
     risk_level = _risk_level(inputs, session_flags)
 
     reasons: list[str] = []

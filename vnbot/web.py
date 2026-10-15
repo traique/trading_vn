@@ -4,26 +4,37 @@ Plain server-rendered HTML (no build step, no JavaScript framework) so the
 upload stays small. Every page but /health asks for WEB_PASSWORD (HTTP Basic,
 any user name), since each analysis spends LLM quota; without it set the pages
 stay locked. A form posted from another site (the browser would send the saved
-password with it) is refused.
+password with it) is refused. Repeated wrong passwords from one client lock it
+out for a few minutes.
 """
 
 from __future__ import annotations
 
 import html
+import logging
 import secrets
+import threading
 import time
 from datetime import datetime
 from typing import Annotated
 from urllib.parse import quote, urlsplit
+from zoneinfo import ZoneInfo
 
 from fastapi import Depends, FastAPI, Form, HTTPException, Request, status
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from vnbot import ui
 from vnbot.jobs import Job, JobQueue
 from vnbot.service import Watchlist, check_request, quick_text, today_vn
 from vnbot.settings import Settings
+
+logger = logging.getLogger(__name__)
+
+VN_TZ = ZoneInfo("Asia/Ho_Chi_Minh")
+MAX_WATCHLIST = 30
 
 _STATUS_VI = {
     "queued": "đang chờ",
@@ -51,7 +62,66 @@ def _page(title: str, body: str, refresh: int | None = None, *, active: str = ""
 
 
 def _when(ts: float | None) -> str:
-    return datetime.fromtimestamp(ts).strftime("%d/%m %H:%M") if ts else ""
+    """An epoch time in Vietnam time, whatever the server's own zone (often UTC)."""
+    return datetime.fromtimestamp(ts, VN_TZ).strftime("%d/%m %H:%M") if ts else ""
+
+
+class LoginThrottle:
+    """Wrong-password counter per client: after ``max_failures`` within ``window``
+    seconds that client is refused for ``lockout`` seconds, right password or not.
+
+    In memory only (one process); the table is bounded so a scan of many
+    addresses cannot grow it without limit.
+    """
+
+    def __init__(self, max_failures: int = 8, window: float = 600.0, lockout: float = 300.0,
+                 max_clients: int = 10_000, clock=time.monotonic):
+        self.max_failures, self.window, self.lockout = max_failures, window, lockout
+        self.max_clients, self.clock = max_clients, clock
+        self._failures: dict[str, list[float]] = {}
+        self._locked: dict[str, float] = {}
+        self._lock = threading.Lock()
+
+    def retry_after(self, client: str) -> int:
+        """Seconds left on ``client``'s lockout, 0 when it may try."""
+        with self._lock:
+            until = self._locked.get(client)
+            if until is None:
+                return 0
+            left = until - self.clock()
+            if left <= 0:
+                del self._locked[client]
+                return 0
+            return int(left) + 1
+
+    def failure(self, client: str) -> None:
+        with self._lock:
+            now = self.clock()
+            recent = [t for t in self._failures.get(client, []) if now - t < self.window] + [now]
+            if len(recent) >= self.max_failures:
+                self._failures.pop(client, None)
+                self._locked[client] = now + self.lockout
+            else:
+                self._failures[client] = recent
+            if len(self._failures) + len(self._locked) > self.max_clients:
+                self._prune(now)
+
+    def success(self, client: str) -> None:
+        with self._lock:
+            self._failures.pop(client, None)
+
+    def _prune(self, now: float) -> None:
+        self._locked = {c: u for c, u in self._locked.items() if u > now}
+        self._failures = {c: ts for c, ts in self._failures.items() if ts and now - ts[-1] < self.window}
+        while self._failures and len(self._failures) + len(self._locked) > self.max_clients:
+            self._failures.pop(next(iter(self._failures)))   # the oldest first seen
+
+
+def _client(request: Request) -> str:
+    # The socket peer. Uvicorn already replaces it with X-Forwarded-For when the
+    # request comes from a proxy it trusts (FORWARDED_ALLOW_IPS, 127.0.0.1 by
+    # default); the header itself is never trusted here, a client could forge it.
+    return request.client.host if request.client else "?"
 
 
 def _job_row(job: Job) -> str:
@@ -134,7 +204,14 @@ def _chart(trader) -> str:
         {"name": "Động lượng", "color": "var(--c-mom)", "values": indexed(mom.history, "nav")},
         {"name": "VNINDEX", "color": "var(--c-bench)", "values": indexed(bench_hist, "benchmark"), "dashed": True},
     ]
-    return ui.nav_chart(dates, series)
+    return ui.nav_chart(dates, series, run_time=_run_time(trader))
+
+
+def _run_time(trader) -> str:
+    """When the scheduler really runs the bot: ``trade_time``, never before the bar is final."""
+    from vnbot.settings import MIN_TRADE_TIME
+
+    return max(trader.settings.trade_time, MIN_TRADE_TIME)
 
 
 def _bot_page(trader, msg: str = "") -> str:
@@ -152,7 +229,7 @@ def _bot_page(trader, msg: str = "") -> str:
     )
     mode = {"paper": "Tài khoản ảo", "signal": "Ảo + tín hiệu thật", "off": "Tắt"}.get(trader.settings.trade_mode, "")
     lead = (f'Chế độ <b>{mode}</b> · tín hiệu thật theo <b>{html.escape(cal.STRATEGIES.get(trader.settings.signal_strategy, ""))}</b>'
-            f' · tự chạy {html.escape(trader.settings.daily_report_time)} mỗi ngày giao dịch'
+            f' · tự chạy lúc {html.escape(_run_time(trader))} mỗi ngày (chạy bù phiên bị lỡ)'
             + (f' · phiên gần nhất {html.escape(last["day"])}' if last.get("day") else ""))
     parts = [ui.hero("Bot giao dịch", lead, run_btn), ui.alert(msg, "info")]
     parts.append(ui.card("So sánh hai chiến lược", _chart(trader),
@@ -187,7 +264,7 @@ def _bot_page(trader, msg: str = "") -> str:
     parts.append('<div class="stack" style="margin-top:16px">'
                  + ui.card("Tự hiệu chỉnh hằng đêm",
                            ui.table([("Ngày", ""), ("Chiến lược", ""), ("Kết quả", ""), ("Ghi chú", "")], crow,
-                                    "Chưa chạy hiệu chỉnh - chạy sau phiên đầu tiên lúc 15:30."),
+                                    f"Chưa chạy hiệu chỉnh - chạy sau phiên đầu tiên lúc {html.escape(_run_time(trader))}."),
                            sub="Mỗi đêm tối đa một thay đổi nhỏ cho mỗi chiến lược", flush=True)
                  + ui.card("Ngưỡng đang dùng",
                            ui.table([("Ngưỡng", ""), ("Nhóm", ""), ("Mặc định", "num"), ("Đang dùng", "num"), ("", "")],
@@ -212,13 +289,26 @@ def create_app(settings: Settings, jobs: JobQueue, watchlist: Watchlist, trader=
         response.headers.setdefault("Referrer-Policy", "same-origin")
         return response
 
-    def guard(credentials: Annotated[HTTPBasicCredentials | None, Depends(_BASIC)] = None) -> None:
+    throttle = LoginThrottle()
+    app.state.login_throttle = throttle
+
+    def guard(request: Request,
+              credentials: Annotated[HTTPBasicCredentials | None, Depends(_BASIC)] = None) -> None:
         if not settings.web_password:
             raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, LOCKED_MESSAGE)
-        if credentials is None or not secrets.compare_digest(
-            credentials.password.encode("utf-8"), settings.web_password.encode("utf-8")
-        ):
+        client = _client(request)
+        wait = throttle.retry_after(client)
+        if wait:
+            raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS,
+                                f"Sai mật khẩu quá nhiều lần. Thử lại sau {wait // 60 + 1} phút.",
+                                headers={"Retry-After": str(wait)})
+        if credentials is None:   # the browser's first request, before it asks for the password
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, headers={"WWW-Authenticate": "Basic"})
+        if not secrets.compare_digest(credentials.password.encode("utf-8"), settings.web_password.encode("utf-8")):
+            throttle.failure(client)
+            logger.warning("Web: wrong password from %s", client)
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, headers={"WWW-Authenticate": "Basic"})
+        throttle.success(client)
 
     def same_origin(request: Request) -> None:
         """Refuse a form posted from another site (CSRF): Basic auth rides along with it."""
@@ -331,19 +421,24 @@ def create_app(settings: Settings, jobs: JobQueue, watchlist: Watchlist, trader=
             text = quick_text(ticker, date)
         except ValueError as exc:
             return RedirectResponse(f"/?error={quote(str(exc))}", status_code=303)
-        except Exception as exc:  # noqa: BLE001 - shown to the user, not raised
-            text = f"Không tính được: {exc}"
-        code = html.escape(ticker.strip().upper()[:20])
-        body = (ui.hero(f'<span class="tick">{code}</span> · quyết định hệ thống',
+        except Exception:  # noqa: BLE001 - shown to the user, not raised
+            # The details go to the log; the page only says what failed.
+            logger.exception("Quick decision for %r failed", ticker)
+            text = "Không tính được quyết định hệ thống (lỗi đọc dữ liệu hoặc tính toán). Thử lại sau ít phút."
+        code = ticker.strip().upper()[:20]
+        body = (ui.hero(f'<span class="tick">{html.escape(code)}</span> · quyết định hệ thống',
                         "Do Quant Engine tính bằng code, không gọi AI.",
                         '<a class="btn btn-ghost" href="/">← Mã khác</a>')
                 + ui.card("", f'<pre class="report">{html.escape(text)}</pre>'))
-        return _page(f"{code} - quyết định hệ thống", body, active="home")
+        return _page(f"{code} - quyết định hệ thống", body, active="home")   # page() escapes the title
 
     @app.post("/watchlist", dependencies=post_guard)
     def save_watchlist(codes: str = Form("")):
         try:
-            watchlist.set([c for c in codes.replace(" ", ",").split(",") if c.strip()])
+            wanted = [c for c in codes.replace(" ", ",").split(",") if c.strip()]
+            if len(wanted) > MAX_WATCHLIST:
+                raise ValueError(f"Tối đa {MAX_WATCHLIST} mã trong danh sách theo dõi.")
+            watchlist.set(wanted)
         except ValueError as exc:
             return RedirectResponse(f"/?error={quote(str(exc))}", status_code=303)
         return RedirectResponse("/", status_code=303)
@@ -398,13 +493,31 @@ def create_app(settings: Settings, jobs: JobQueue, watchlist: Watchlist, trader=
             raise HTTPException(404, "Chưa có báo cáo")
         return FileResponse(job.html_path, media_type="text/html; charset=utf-8")
 
-    @app.exception_handler(HTTPException)
-    def http_error(request: Request, exc: HTTPException):
+    # Starlette's class: also the 404/405 the router raises for unknown paths/methods.
+    @app.exception_handler(StarletteHTTPException)
+    def http_error(request: Request, exc: StarletteHTTPException):
         if exc.status_code == 401:
             return HTMLResponse("Cần mật khẩu", status_code=401, headers=exc.headers)
-        body = (ui.hero("Có lỗi" if exc.status_code != 503 else "Trang web đang khoá", "",
-                        '<a class="btn btn-ghost" href="/">← Trang chính</a>')
-                + ui.alert(str(exc.detail), "err"))
-        return _page("Lỗi", body, status_code=exc.status_code)
+        message = {"Not Found": "Không tìm thấy trang.",
+                   "Method Not Allowed": "Phương thức không được hỗ trợ."}.get(exc.detail, str(exc.detail))
+        title = {503: "Trang web đang khoá", 429: "Tạm khoá đăng nhập"}.get(exc.status_code, "Có lỗi")
+        body = (ui.hero(title, "", '<a class="btn btn-ghost" href="/">← Trang chính</a>')
+                + ui.alert(message, "err"))
+        return HTMLResponse(ui.page("Lỗi", body, show_bot=False), status_code=exc.status_code,
+                            headers=exc.headers)
+
+    @app.exception_handler(RequestValidationError)
+    def bad_form(request: Request, exc: RequestValidationError):
+        body = (ui.hero("Có lỗi", "", '<a class="btn btn-ghost" href="/">← Trang chính</a>')
+                + ui.alert("Thiếu hoặc sai dữ liệu trong biểu mẫu.", "err"))
+        return _page("Lỗi", body, status_code=422, show_bot=False)
+
+    @app.exception_handler(Exception)
+    def server_error(request: Request, exc: Exception):
+        # Never a traceback or an exception text on the page; Starlette re-raises
+        # the exception after this response, so the server still logs it.
+        body = (ui.hero("Có lỗi", "", '<a class="btn btn-ghost" href="/">← Trang chính</a>')
+                + ui.alert("Lỗi máy chủ khi xử lý yêu cầu. Chi tiết đã ghi vào log.", "err"))
+        return _page("Lỗi", body, status_code=500, show_bot=False)
 
     return app

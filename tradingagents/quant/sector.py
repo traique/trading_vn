@@ -10,6 +10,8 @@ import logging
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
+import pandas as pd
+
 from tradingagents.quant import features as feat
 
 logger = logging.getLogger(__name__)
@@ -98,13 +100,55 @@ def _momentum(trend_1m: float) -> str:
     return "dump"
 
 
+# A peer whose last bar is more than this many sessions behind the freshest
+# peer (suspended, vendor not updating - load_ohlcv accepts up to 12 calendar
+# days) would compare a different date range with VNINDEX: left out.
+MAX_PEER_LAG_SESSIONS = 1
+_BARS_1M = 23  # 22 sessions of change
+_BARS_3M = 66  # 65 sessions of change
+
+
+def _close_on_or_before(dates: list[str], closes: list[float], day: str) -> float | None:
+    from bisect import bisect_right
+
+    i = bisect_right(dates, day)
+    return closes[i - 1] if i > 0 else None
+
+
+def _calendar(series: list[tuple[list[str], list[float]]]) -> list[str]:
+    """Session calendar: every date any peer traded on, ascending."""
+    return sorted({day for dates, _ in series for day in dates})
+
+
+def _aligned_trends(
+    series: list[tuple[list[str], list[float]]], bars: int
+) -> list[float]:
+    """Each peer's move from the session ``bars - 1`` sessions back on the
+    peers' common calendar to its last close. A peer with no bar on
+    or before that session (listed later, too short) is left out, so a short
+    history does not pass a shorter move off as the full horizon."""
+    reference = _calendar(series)
+    if len(reference) < bars:
+        return []
+    start_day = reference[-bars]
+    out = []
+    for dates, closes in series:
+        start = _close_on_or_before(dates, closes, start_day)
+        if start and start > 0:
+            out.append(feat.trend_pct([start, closes[-1]]))
+    return out
+
+
 def sector_performance(
     symbol: str, as_of_date: str, vnindex_closes: list[float] | None = None
 ) -> SectorPerformance | None:
     """Hiệu suất 1 tháng (22 phiên) / 3 tháng (65 phiên) bình quân của ngành chính.
 
-    Mã nào không lấy được giá thì bỏ qua; dưới 2 mã có dữ liệu thì trả None.
-    ``vs_vnindex_1m`` là None khi không có chuỗi VNINDEX - không bịa so sánh.
+    Mã nào không lấy được giá, hoặc phiên cuối trễ hơn mã mới nhất quá
+    MAX_PEER_LAG_SESSIONS phiên (tạm ngừng giao dịch), thì bỏ qua; dưới 2 mã có
+    dữ liệu thì trả None. Điểm đầu của mỗi mã được căn theo NGÀY trên lịch phiên
+    chung của các mã, không theo vị trí mảng. ``vs_vnindex_1m`` là None khi không
+    có chuỗi VNINDEX - không bịa so sánh.
     """
     from tradingagents.dataflows.ohlcv import load_ohlcv
 
@@ -114,21 +158,39 @@ def sector_performance(
     key = keys[0]
     members = SECTOR_MAP[key]["symbols"][:SECTOR_SAMPLE_SIZE]
 
-    def closes(code: str) -> list[float] | None:
+    def bars(code: str) -> tuple[list[str], list[float]] | None:
         try:
-            return [float(c) for c in load_ohlcv(code, as_of_date)["Close"].tolist()]
+            frame = load_ohlcv(code, as_of_date)
+            closes = [float(c) for c in frame["Close"].tolist()]
+            dates = [pd.Timestamp(d).strftime("%Y-%m-%d") for d in frame["Date"].tolist()]
         except Exception:  # noqa: BLE001 - one missing peer must not sink the sector
             return None
+        return (dates, closes) if len(dates) == len(closes) else None
 
     with ThreadPoolExecutor(max_workers=4) as pool:
-        series = [c for c in pool.map(closes, members) if c and len(c) >= 23]
+        series = [b for b in pool.map(bars, members) if b and len(b[1]) >= _BARS_1M]
+    if not series:
+        return None
+    reference = _calendar(series)
+    series = [
+        (d, c) for d, c in series
+        if sum(1 for day in reference if day > d[-1]) <= MAX_PEER_LAG_SESSIONS
+    ]
     if len(series) < 2:
         return None
-    trend_1m = sum(feat.trend_pct(c[-23:]) for c in series) / len(series)
-    trend_3m = sum(feat.trend_pct(c[-66:]) for c in series) / len(series)
+    moves_1m = _aligned_trends(series, _BARS_1M)
+    if len(moves_1m) < 2:
+        return None
+    trend_1m = sum(moves_1m) / len(moves_1m)
+    moves_3m = _aligned_trends(series, _BARS_3M)
+    # No peer covers 3 months (sector of new listings): the longest window on
+    # the common calendar, the same for every peer, rather than mixed horizons.
+    if not moves_3m:
+        moves_3m = _aligned_trends(series, min(_BARS_3M, len(_calendar(series)))) or moves_1m
+    trend_3m = sum(moves_3m) / len(moves_3m)
     vs = None
-    if vnindex_closes and len(vnindex_closes) >= 23:
-        vs = round(trend_1m - feat.trend_pct(vnindex_closes[-23:]), 2)
+    if vnindex_closes and len(vnindex_closes) >= _BARS_1M:
+        vs = round(trend_1m - feat.trend_pct(vnindex_closes[-_BARS_1M:]), 2)
     return SectorPerformance(
         key=key,
         label=SECTOR_MAP[key]["label"],
@@ -136,5 +198,5 @@ def sector_performance(
         trend_3m=round(trend_3m, 2),
         vs_vnindex_1m=vs,
         momentum=_momentum(trend_1m),
-        sample=len(series),
+        sample=len(moves_1m),
     )

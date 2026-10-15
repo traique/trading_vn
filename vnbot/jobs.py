@@ -8,10 +8,13 @@ Listeners (the Telegram bot) are told when each stage lands.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
+import os
 import queue
 import shutil
+import tempfile
 import threading
 import time
 import uuid
@@ -199,9 +202,7 @@ class JobQueue:
 
     def _save(self) -> None:
         data = [asdict(j) for j in self._jobs.values()]
-        tmp = self._path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-        tmp.replace(self._path)
+        write_text_atomic(self._path, json.dumps(data, ensure_ascii=False))
 
     def _load(self) -> None:
         if not self._path.exists():
@@ -233,6 +234,25 @@ class JobQueue:
         folders = sorted((p for p in root.iterdir() if p.is_dir()), key=lambda p: p.stat().st_mtime, reverse=True)
         for old in folders[self.settings.keep_reports:]:
             shutil.rmtree(old, ignore_errors=True)
+
+
+def write_text_atomic(path: Path, text: str) -> None:
+    """Replace ``path`` with ``text`` all at once: a unique temporary file in the same
+    folder, flushed to disk, then renamed over. A crash leaves the old file or the new
+    one, never half of one, and two writers never share a temporary file."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
 
 
 def prune_cache(settings: Settings) -> int:

@@ -11,19 +11,39 @@ Each night, on the basket's last ``TRAIN_SESSIONS + HOLDOUT_SESSIONS`` sessions:
 2. Challengers are the champion with ONE tunable moved one step either way,
    plus the previous champion (a way back) and the defaults (a reset).
 3. A challenger must beat the champion on the training part by
-   ``MIN_TRAIN_GAIN`` with at least ``MIN_TRAIN_TRADES`` buys; the best three
-   such are then traded on the holdout, which none of them was picked on.
-4. The first that also does at least as well as the champion on the holdout
-   - better by ``MIN_HOLDOUT_GAIN`` when it traded there at least
-   ``MIN_HOLDOUT_TRADES`` times, no worse when the holdout gave too few trades
-   to judge (a quiet, risk-off stretch) - with a max drawdown no more than
-   ``MAX_DRAWDOWN_WORSE`` points deeper, replaces it.
+   ``MIN_TRAIN_GAIN`` with at least ``MIN_TRAIN_TRADES`` buys; the best
+   ``TOP_FOR_HOLDOUT`` such go on.
+4. Walk-forward: the training part is cut into ``WALK_FORWARD_FOLDS``
+   disjoint, consecutive windows; a challenger must score at least as well as
+   the champion on EVERY one of them (a gain that comes from one lucky
+   stretch is not a gain). Skipped when a window would be shorter than
+   ``MIN_FOLD_SESSIONS`` (too short to mean anything).
+5. Those left are traded on the holdout, which none of them was picked on.
+   A challenger must have traded there at least ``MIN_HOLDOUT_TRADES`` times
+   (one that simply stops trading while the champion loses proves nothing).
+   The best on the holdout must beat the champion there by
+   ``MIN_HOLDOUT_GAIN`` times the number of challengers that reached the
+   holdout (a Bonferroni-like penalty: the more are tried, the likelier one
+   wins by luck), with a max drawdown no more than ``MAX_DRAWDOWN_WORSE``
+   points deeper. When the champion itself traded fewer than
+   ``MIN_HOLDOUT_TRADES`` times there (it drifted too strict, or a risk-off
+   stretch), there is no score to beat by a margin: a challenger that did
+   trade there and is no worse wins, and so does the reset or the way back
+   when no worse. A quiet champion must not veto its own replacement, or a
+   do-nothing set would keep the bot in cash for good.
+6. Rate limit: after a change, the strategy is not changed again for
+   ``MIN_SESSIONS_BETWEEN_CHANGES`` sessions (read from the history). The
+   holdout of one night overlaps the next night's by all but one session, so
+   nightly retries would keep testing the same data until something passes.
+   The rule holds for every challenger, the way back and the reset included.
 
 No challenger may draw down more than ``MAX_DRAWDOWN_ABS`` (25%, the risk
-the owner accepts) on either part. So at most one small change per night, only
-on evidence from data it was not chosen on, and a bad change is undone the same way it was made: the previous
-champion is always a challenger. Every night's result is appended to
-``calibration_history.jsonl``.
+the owner accepts) on either part. So at most one small change per strategy
+every ``MIN_SESSIONS_BETWEEN_CHANGES`` sessions, only on evidence from data it
+was not chosen on, and a bad change is undone the same way it was made: the
+previous champion is always a challenger. Every night's result is appended to
+``calibration_history.jsonl`` (one JSON object per line, timestamped in
+Vietnam time; an unreadable line is skipped, never fatal).
 
 Score = return % minus half the max drawdown % (``simulator.score``).
 """
@@ -32,10 +52,11 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from dataclasses import asdict, dataclass, field, replace
-from datetime import datetime
 from pathlib import Path
 
+from tradingagents.market import vn_rules
 from tradingagents.quant import params as qparams
 from tradingagents.quant.params import MOMENTUM_TUNABLE, TUNABLE, Params
 from tradingagents.trading import simulator as sim
@@ -52,9 +73,17 @@ MAX_DRAWDOWN_WORSE = 2.0
 TOP_FOR_HOLDOUT = 3
 # The drawdown the owner accepts: no challenger deeper than this on either part.
 MAX_DRAWDOWN_ABS = 25.0
+# Walk-forward check on the training part: disjoint windows, each at least this long.
+WALK_FORWARD_FOLDS = 3
+MIN_FOLD_SESSIONS = 40
+# At most one accepted change per strategy in this many sessions.
+MIN_SESSIONS_BETWEEN_CHANGES = 20
 HISTORY_FILE = "calibration_history.jsonl"
 
 STRATEGIES = {"engine": "Quant Engine", "momentum": "Động lượng"}
+# Challengers that are known sets, not untested moves: the way back and the reset.
+WAY_BACK, RESET = "quay lại bộ trước", "về mặc định"
+KNOWN_SETS = (WAY_BACK, RESET)
 
 
 def _runner(strategy: str):
@@ -75,6 +104,7 @@ class Trial:
     params: Params
     train: sim.Score | None = None
     holdout: sim.Score | None = None
+    folds: list[sim.Score] | None = None     # walk-forward windows of the training part
 
 
 @dataclass
@@ -88,6 +118,7 @@ class Report:
     accepted: Trial | None = None
     note: str = ""
     strategy: str = "engine"
+    applied: bool = False      # the accepted challenger was put in force (not a dry run)
 
     def summary(self) -> str:
         c = self.champion
@@ -110,10 +141,12 @@ class Report:
                 return None
             return {"name": t.name, "params": qparams.to_dict(t.params),
                     "train": asdict(t.train) if t.train else None,
-                    "holdout": asdict(t.holdout) if t.holdout else None}
-        return {"as_of": self.as_of, "at": datetime.now().isoformat(timespec="seconds"),
+                    "holdout": asdict(t.holdout) if t.holdout else None,
+                    "folds": [asdict(f) for f in t.folds] if t.folds else None}
+        return {"as_of": self.as_of, "at": vn_rules.now_vn().isoformat(timespec="seconds"),
                 "symbols": self.symbols, "sessions": self.sessions, "holdout_from": self.holdout_from,
                 "champion": trial(self.champion), "accepted": trial(self.accepted),
+                "applied": bool(self.accepted is not None and self.applied),
                 "tried": [trial(t) for t in self.tried], "note": self.note, "strategy": self.strategy}
 
 
@@ -139,23 +172,83 @@ def history_path() -> Path:
     return qparams._path().with_name(HISTORY_FILE)
 
 
+def _read_history() -> list[dict]:
+    """Every readable night of the history, oldest first. A line that is not a JSON
+    object (a write cut by a crash, a hand edit) is skipped, never fatal."""
+    path = history_path()
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    rows = []
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            logger.warning("Calibration history: skipped an unreadable line in %s", path)
+            continue
+        if isinstance(row, dict):
+            rows.append(row)
+    return rows
+
+
+def _changes(strategy: str, as_of: str | None = None) -> list[dict]:
+    """The nights that put a change of this strategy in force (dry runs left out),
+    oldest first; with ``as_of``, only those on or before it."""
+    out = []
+    for row in _read_history():
+        if not (isinstance(row.get("accepted"), dict) and isinstance(row.get("champion"), dict)):
+            continue
+        if row.get("strategy", "engine") != strategy or not row.get("applied", True):
+            continue
+        if as_of is not None and str(row.get("as_of", "")) > as_of:
+            continue
+        out.append(row)
+    return out
+
+
 def _previous_champion(current: Params, strategy: str = "engine") -> Params | None:
     """The thresholds in force before this strategy's last accepted change, if any
     (only that strategy's fields are taken back)."""
-    path = history_path()
-    if not path.exists():
-        return None
-    try:
-        rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
-    except (OSError, ValueError):
-        return None
     keys = _keys(strategy)
-    for row in reversed(rows):
-        if row.get("accepted") and row.get("champion") and row.get("strategy", "engine") == strategy:
+    for row in reversed(_changes(strategy)):
+        try:
             old = qparams.coerce(row["champion"]["params"])
-            previous = replace(current, **{k: getattr(old, k) for k in keys})
-            return previous if previous != current else None
+        except (AttributeError, KeyError, TypeError, ValueError):
+            continue
+        previous = replace(current, **{k: getattr(old, k) for k in keys})
+        return previous if previous != current else None
     return None
+
+
+def _sessions_since_change(strategy: str, as_of: str, dates: list[str]) -> tuple[str, int] | None:
+    """(date, sessions since) of this strategy's last change on or before ``as_of``;
+    None when there is none, or it is older than the dataset (long enough ago)."""
+    changes = _changes(strategy, as_of)
+    if not changes:
+        return None
+    last = str(changes[-1].get("as_of", ""))
+    if not dates or last < dates[0]:
+        return None
+    return last, sum(1 for d in dates if last < d <= as_of)
+
+
+def _folds(train_dates: list[str]) -> list[tuple[str, str]]:
+    """``WALK_FORWARD_FOLDS`` disjoint consecutive (start, end) windows of the
+    training part, or none when one would be shorter than ``MIN_FOLD_SESSIONS``."""
+    n = len(train_dates)
+    size = n // WALK_FORWARD_FOLDS if WALK_FORWARD_FOLDS > 0 else 0
+    if size < MIN_FOLD_SESSIONS:
+        return []
+    bounds = [i * size for i in range(WALK_FORWARD_FOLDS)] + [n]
+    return [(train_dates[bounds[i]], train_dates[bounds[i + 1] - 1]) for i in range(WALK_FORWARD_FOLDS)]
+
+
+def holdout_margin(tested: int) -> float:
+    """What the best of ``tested`` challengers must win by on the holdout."""
+    return MIN_HOLDOUT_GAIN * max(tested, 1)
 
 
 def calibrate(symbols: list[str], as_of: str, *, apply: bool = True, data: sim.Dataset | None = None,
@@ -175,17 +268,27 @@ def calibrate(symbols: list[str], as_of: str, *, apply: bool = True, data: sim.D
     def on_holdout(p):
         return sim.score(run(data, p, start=holdout_from))
 
+    def on_window(p, start, end):
+        return sim.score(run(data, p, start=start, end=end))
+
     champ = Trial("hiện tại", champion, on_train(champion), on_holdout(champion))
     report = Report(as_of=as_of, symbols=len(data.symbols), sessions=len(data.dates),
                     holdout_from=holdout_from, champion=champ, strategy=strategy)
 
+    recent = _sessions_since_change(strategy, as_of, data.dates)
+    if recent is not None and recent[1] < MIN_SESSIONS_BETWEEN_CHANGES:
+        report.note = (f"Vừa đổi ngày {recent[0]} ({recent[1]} phiên trước); chờ đủ "
+                       f"{MIN_SESSIONS_BETWEEN_CHANGES} phiên mới xét đổi tiếp.")
+        _append_history(report)
+        return report
+
     challengers = neighbours(champion, keys)
     previous = _previous_champion(champion, strategy)
     if previous is not None:
-        challengers.append(Trial("quay lại bộ trước", previous))
+        challengers.append(Trial(WAY_BACK, previous))
     reset = replace(champion, **{k: getattr(qparams.DEFAULT, k) for k in keys})
     if reset != champion:
-        challengers.append(Trial("về mặc định", reset))
+        challengers.append(Trial(RESET, reset))
     for trial in challengers:
         trial.train = on_train(trial.params)
     report.tried = challengers
@@ -198,43 +301,77 @@ def calibrate(symbols: list[str], as_of: str, *, apply: bool = True, data: sim.D
     )[:TOP_FOR_HOLDOUT]
     if not promising:
         report.note = "Không bộ nào thắng rõ trên dữ liệu huấn luyện."
+
+    folds = _folds([d for d in data.dates if d <= train_end])
+    if promising and folds:
+        champ.folds = [on_window(champion, start, end) for start, end in folds]
+        for trial in promising:
+            trial.folds = [on_window(trial.params, start, end) for start, end in folds]
+        steady = [t for t in promising
+                  if all(f.value >= c.value for f, c in zip(t.folds, champ.folds, strict=True))]
+        if not steady:
+            report.note = (f"Bộ thắng trên dữ liệu huấn luyện thua ở ít nhất một trong "
+                           f"{len(folds)} giai đoạn huấn luyện - lợi thế không ổn định.")
+        promising = steady
+
     for trial in promising:
         trial.holdout = on_holdout(trial.params)
-        judged = trial.holdout.trades >= MIN_HOLDOUT_TRADES
-        margin = MIN_HOLDOUT_GAIN if judged else 0.0
-        if (
-            trial.holdout.value >= champ.holdout.value + margin
-            and trial.holdout.max_drawdown_pct <= champ.holdout.max_drawdown_pct + MAX_DRAWDOWN_WORSE
-            and trial.holdout.max_drawdown_pct <= MAX_DRAWDOWN_ABS
-        ):
-            report.accepted = trial
-            break
-    if promising and report.accepted is None:
+    margin = holdout_margin(len(promising))
+
+    def within_drawdown(t: Trial) -> bool:
+        return (t.holdout.max_drawdown_pct <= champ.holdout.max_drawdown_pct + MAX_DRAWDOWN_WORSE
+                and t.holdout.max_drawdown_pct <= MAX_DRAWDOWN_ABS)
+
+    champ_quiet = champ.holdout.trades < MIN_HOLDOUT_TRADES
+    if champ_quiet:
+        # A champion that (almost) stopped trading cannot be beaten "by a margin" on
+        # the holdout, and must not veto its own replacement forever (a set drifted too
+        # strict would keep the bot in cash). So: a challenger that does trade there and
+        # is no worse, or the reset / way back (known sets) when no worse, may replace it.
+        qualified = [
+            t for t in promising
+            if (t.holdout.trades >= MIN_HOLDOUT_TRADES or t.name in KNOWN_SETS)
+            and t.holdout.value >= champ.holdout.value and within_drawdown(t)
+        ]
+    else:
+        qualified = [
+            t for t in promising
+            if t.holdout.trades >= MIN_HOLDOUT_TRADES
+            and t.holdout.value >= champ.holdout.value + margin and within_drawdown(t)
+        ]
+    if qualified:
+        report.accepted = max(qualified, key=lambda t: (t.holdout.trades >= MIN_HOLDOUT_TRADES, t.holdout.value))
+    elif promising and champ_quiet:
+        report.note = (f"Bộ hiện tại chỉ có {champ.holdout.trades} lệnh mua trên dữ liệu kiểm tra và không bộ "
+                       "thắng nào giao dịch đủ ở đó - chưa đủ bằng chứng để đổi.")
+    elif promising:
         report.note = "Bộ thắng trên dữ liệu huấn luyện không giữ được lợi thế trên dữ liệu kiểm tra."
 
     if report.accepted and apply:
         qparams.save(report.accepted.params, note=f"{as_of} {strategy}: {report.accepted.name}")
+        report.applied = True
         logger.info("Calibration %s: %s", as_of, report.accepted.name)
     _append_history(report)
     return report
 
 
 def _append_history(report: Report) -> None:
+    """Append one line; a line cut short by an earlier crash is closed first so it
+    cannot swallow this one, and the line is on disk before this returns."""
     path = history_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "a", encoding="utf-8") as handle:
-        handle.write(json.dumps(report.to_dict(), ensure_ascii=False) + "\n")
+    line = json.dumps(report.to_dict(), ensure_ascii=False) + "\n"
+    with open(path, "a+b") as handle:
+        handle.seek(0, os.SEEK_END)
+        if handle.tell() > 0:
+            handle.seek(-1, os.SEEK_END)
+            if handle.read(1) != b"\n":
+                line = "\n" + line
+        handle.write(line.encode("utf-8"))
+        handle.flush()
+        os.fsync(handle.fileno())
 
 
 def last_reports(limit: int = 10) -> list[dict]:
-    path = history_path()
-    if not path.exists():
-        return []
-    lines = [line for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
-    out = []
-    for line in lines[-limit:]:
-        try:
-            out.append(json.loads(line))
-        except ValueError:
-            continue
-    return out
+    rows = _read_history()
+    return rows[-limit:] if limit > 0 else []

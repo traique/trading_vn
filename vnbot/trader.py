@@ -6,16 +6,22 @@ Two strategies run side by side, each on its own paper book:
 - ``momentum``: the momentum rotation over VN30 (trading/momentum.py).
 
 The report compares them every day; ``SIGNAL_STRATEGY`` picks which one the
-real-account signals follow. Each trading day after the close (``run_day``):
+real-account signals follow. After the close (``run_day`` / ``catch_up``):
 
-1. The paper account settles the session: yesterday's orders fill or lapse,
-   stops and targets are checked on today's bar (ledger rules, T+2, fees).
+1. Every VNINDEX session since a book's last processed day is replayed in
+   order, each with the data up to that session only (no look-ahead): the
+   orders of the session before fill or lapse, stops and targets are checked
+   on the session's bar (ledger rules, T+2, fees, slippage). A session whose
+   bar is missing or not final is never processed: it waits for the next run.
 2. The engine decides for the basket (VN30 + watchlist + anything held), with
    the paper book as its portfolio so held stocks are judged as holdings.
-3. The paper account places tomorrow's orders; the NAV is recorded beside VNINDEX.
-4. In ``signal`` mode, the same decisions are turned into suggested orders
-   sized on the real book, and today's stop/target hits on real holdings are
-   flagged. The real book changes only when its owner reports a fill (/khop).
+3. The paper account places the next session's orders; the NAV is recorded
+   beside VNINDEX. Each book saves after each session with its own
+   ``meta["last_day"]``, so a run that fails half-way is resumed, not replayed.
+4. In ``signal`` mode, the decisions of the last session are turned into
+   suggested orders sized on the real book, and that session's stop/target
+   hits on real holdings are flagged. The real book changes only when its
+   owner reports a fill (/khop) or the cash (/von); the bot never writes it.
 
 Then, if enabled, the nightly calibration may move one threshold (see
 ``tradingagents.trading.calibrate``). No order is ever sent to a broker.
@@ -23,15 +29,36 @@ Then, if enabled, the nightly calibration may move one threshold (see
 
 from __future__ import annotations
 
+import bisect
 import copy
 import json
 import logging
+import math
 import threading
+import time
+from dataclasses import dataclass, field
+from datetime import date as _date, timedelta
 from pathlib import Path
 
-from vnbot.settings import Settings
+from vnbot.jobs import write_text_atomic
+from vnbot.settings import MIN_TRADE_TIME, Settings
 
 logger = logging.getLogger(__name__)
+
+# Sessions replayed after downtime. Older missed sessions are skipped (their
+# orders lapse) and the report says so: weeks of replay would take long and
+# the decisions would be stale anyway.
+MAX_CATCH_UP = 20
+
+# After the listing (exchange of each stock) failed to load, runs use the HOSE
+# tick grid for this long instead of waiting on the listing again.
+LISTING_RETRY_SECONDS = 1800
+_listing_down_until = 0.0
+
+# A session is not saved when the price sources did not answer for a held stock or
+# for more than this share of the basket: it is retried later (the source breaker
+# turns a short outage into minutes of failures for every symbol).
+MAX_UNAVAILABLE_SHARE = 0.2
 
 
 def _fmt(value: float | None) -> str:
@@ -44,13 +71,237 @@ def _bn(value: float) -> str:
     return f"{value / 1e6:,.1f} tr".replace(",", "X").replace(".", ",").replace("X", ".")
 
 
+def _now_vn():
+    from tradingagents.market import vn_rules
+
+    return vn_rules.now_vn()
+
+
+def today_vn() -> str:
+    return _now_vn().strftime("%Y-%m-%d")
+
+
+def final_day(now=None) -> str:
+    """The latest calendar day whose session (if there was one) is final: today from
+    MIN_TRADE_TIME (Vietnam time), else yesterday."""
+    now = now or _now_vn()
+    day = now.date()
+    if now.strftime("%H:%M") < MIN_TRADE_TIME:
+        day -= timedelta(days=1)
+    return day.isoformat()
+
+
+def _book_day(book) -> str:
+    """The last session a book has processed ("" for a new book). Books saved before
+    ``meta["last_day"]`` existed (the momentum book) fall back to their NAV history."""
+    day = book.meta.get("last_day")
+    if day:
+        return str(day)
+    return str(book.history[-1]["date"]) if book.history else ""
+
+
+def _pending(sessions: list[str], last: str) -> tuple[list[str], int]:
+    """The sessions a book at ``last`` still has to process, and how many are skipped (cap)."""
+    if not last:
+        return sessions[-1:], 0          # a new book starts at the latest session, no backfill
+    after = [s for s in sessions if s > last]
+    skipped = max(0, len(after) - MAX_CATCH_UP)
+    return after[skipped:], skipped
+
+
+def _expire(book, prev: str | None) -> list:
+    """Drop the orders whose session has passed without being processed.
+
+    An order created on D is for the session after D. Before processing session S
+    (previous session ``prev``), an order created before ``prev`` was meant for a
+    session up to ``prev``: it must lapse rather than fill at S's prices.
+    """
+    if not prev:
+        return []
+    stale = [o for o in book.orders if o.created < prev]
+    if stale:
+        book.orders = [o for o in book.orders if o.created >= prev]
+    return stale
+
+
+def _finite(value) -> bool:
+    try:
+        return math.isfinite(float(value))
+    except (TypeError, ValueError):
+        return False
+
+
+def _unavailable(exc: BaseException) -> bool:
+    """Whether ``exc`` (or what caused it) is a price source that did not answer."""
+    from tradingagents.dataflows.errors import VendorUnavailableError
+
+    seen = 0
+    while exc is not None and seen < 10:
+        if isinstance(exc, VendorUnavailableError):
+            return True
+        exc, seen = exc.__cause__ or exc.__context__, seen + 1
+    return False
+
+
+def _add_weekdays(day: str, n: int) -> str:
+    """``n`` weekdays after ``day`` (holidays are not known)."""
+    d = _date.fromisoformat(day[:10])
+    while n > 0:
+        d += timedelta(days=1)
+        if d.weekday() < 5:
+            n -= 1
+    return d.isoformat()
+
+
+def _pending_lots(pos, day: str) -> list[tuple[str, int]]:
+    """(T+2 day, shares) of a real holding's lots that cannot be sold all through the
+    session after ``day``: shares bought on T arrive in the afternoon of T+2."""
+    from tradingagents.trading.ledger import SETTLEMENT_SESSIONS, _sessions_between
+
+    due: dict[str, int] = {}
+    for lot in pos.unsettled:
+        if max(lot["sessions"], _sessions_between(lot["date"], day)) < SETTLEMENT_SESSIONS:
+            t2 = _add_weekdays(lot["date"], SETTLEMENT_SESSIONS)
+            due[t2] = due.get(t2, 0) + lot["qty"]
+    return sorted(due.items())
+
+
+def _t2_note(pending: list[tuple[str, int]], day: str) -> str:
+    nxt = _add_weekdays(day, 1)
+    return "; ".join(f"{_fmt(qty)} cp chưa về đủ T+2: chỉ bán được từ chiều "
+                     + (f"phiên tới ({t2})" if t2 <= nxt else t2) + " - đặt lệnh phiên chiều/ATC"
+                     for t2, qty in pending)
+
+
+def _sell_advice(pos, day: str, verb: str = "BÁN", when: str = "") -> str:
+    """What of a real holding can be sold next session, and when the rest can (T+2)."""
+    pending = _pending_lots(pos, day)
+    if not pending:
+        return f"đề xuất {verb} {_fmt(pos.qty)} cp{when}"
+    free = max(0, pos.qty - sum(qty for _, qty in pending))
+    head = f"đề xuất {verb} {_fmt(free)} cp{when}; " if free else ""
+    return head + _t2_note(pending, day)
+
+
+def _adjustment_lines(book, day: str) -> list[str]:
+    """The day's corporate-action adjustments of a paper book (ledger ``_rebase``)."""
+    return [f"- ⚖️ {a['symbol']}: giá điều chỉnh quyền (cổ tức/thưởng) x{a['ratio']:.3f} - "
+            f"{_fmt(a['before'])} → {_fmt(a['after'])} cp, stop/T1/T2 điều chỉnh theo"
+            for a in book.meta.get("adjustments") or [] if isinstance(a, dict) and a.get("date") == day]
+
+
+@dataclass
+class RunResult:
+    day: str | None              # the last session the books are at
+    text: str                    # the report (the previous one when nothing was new)
+    new: bool = False            # whether this run processed at least one session
+    sessions: list[str] = field(default_factory=list)   # processed by this run, in order
+
+
+class _Market:
+    """Daily bars for one run, read once per symbol up to ``as_of`` and sliced per session.
+
+    Bars come unfilled (``fill_gaps=False``): a session with missing prices is a
+    session without trading, never a forward-filled copy of the day before.
+    """
+
+    def __init__(self, as_of: str):
+        self.as_of = as_of
+        self._frames: dict[str, tuple | Exception | None] = {}
+        self._boards: dict[str, str | None] | None = None
+
+    def _entry(self, symbol: str):
+        if symbol not in self._frames:
+            from tradingagents.dataflows import ohlcv
+            from tradingagents.dataflows.errors import NoMarketDataError, VendorError
+
+            try:
+                frame = ohlcv.load_ohlcv(symbol, self.as_of, fill_gaps=False)
+                dates = [d.strftime("%Y-%m-%d") for d in frame["Date"]]
+                self._frames[symbol] = (frame.reset_index(drop=True), dates)
+            except NoMarketDataError as exc:
+                logger.warning("Bot: no bars for %s up to %s: %s", symbol, self.as_of, exc)
+                self._frames[symbol] = None
+            except VendorError as exc:          # the source did not answer: not "no data"
+                logger.warning("Bot: bars for %s unavailable: %s", symbol, exc)
+                self._frames[symbol] = exc
+        return self._frames[symbol]
+
+    def frame(self, symbol: str, day: str, *, required: bool = False):
+        """Bars up to and including ``day``, or None. ``required``: a source that did
+        not answer raises (the run is retried) instead of passing for "no data"."""
+        entry = self._entry(symbol)
+        if isinstance(entry, Exception):
+            if required:
+                raise entry
+            return None
+        if entry is None:
+            return None
+        frame, dates = entry
+        return frame.iloc[: bisect.bisect_right(dates, day)]
+
+    def sessions(self, symbol: str) -> list[str]:
+        entry = self._entry(symbol)
+        if isinstance(entry, Exception):
+            raise entry
+        return list(entry[1]) if entry else []
+
+    def exchange(self, symbol: str) -> str | None:
+        """HOSE/HNX/UPCOM (the tick grid of slipped fills); None when unknown (HOSE grid).
+        The listing is asked once per run: when it is down, not once per symbol."""
+        global _listing_down_until
+        if self._boards is None:
+            from tradingagents.market import vn_rules
+
+            self._boards = {}
+            if time.monotonic() >= _listing_down_until:
+                try:
+                    from tradingagents.dataflows.vendors import vci
+
+                    self._boards = {str(row.get("symbol", "")).upper(): vn_rules.normalize_exchange(row.get("board"))
+                                    for row in vci.fetch_listing() if isinstance(row, dict)}
+                except Exception as exc:  # noqa: BLE001 - enrichment only
+                    logger.warning("Bot: listing unavailable, HOSE tick grid assumed: %s", exc)
+                    _listing_down_until = time.monotonic() + LISTING_RETRY_SECONDS
+        return self._boards.get(symbol.upper())
+
+    def bar(self, symbol: str, day: str, *, required: bool = False):
+        """The ledger Bar of ``symbol`` on ``day``; None when it did not trade that day."""
+        from tradingagents.trading.ledger import Bar
+
+        frame = self.frame(symbol, day, required=required)
+        if frame is None or not len(frame) or frame["Date"].iloc[-1].strftime("%Y-%m-%d") != day:
+            return None            # suspended (or no data) that session
+        row = frame.iloc[-1]
+        prev = float(frame["Close"].iloc[-2]) if len(frame) > 1 else None
+        prev_date = frame["Date"].iloc[-2].strftime("%Y-%m-%d") if len(frame) > 1 else None
+        volume = row.get("Volume")
+        volume = float(volume) if _finite(volume) else None
+        # NaN prices stay NaN: Bar.tradable then treats the session as one without trading.
+        return Bar(day, float(row["Open"]), float(row["High"]), float(row["Low"]), float(row["Close"]), prev,
+                   exchange=self.exchange(symbol), volume=volume, prev_date=prev_date)
+
+    def close(self, symbol: str, day: str) -> float | None:
+        frame = self.frame(symbol, day)
+        if frame is None or not len(frame):
+            return None
+        value = float(frame["Close"].iloc[-1])
+        return value if _finite(value) else None
+
+
 class TradingBot:
     def __init__(self, settings: Settings, watchlist, notify=None):
         self.settings, self.watchlist = settings, watchlist
         self.notify = notify or (lambda text: None)
         self.dir = settings.data_dir / "trading"
         self.dir.mkdir(parents=True, exist_ok=True)
-        self._lock = threading.Lock()
+        # One run at a time over the paper books and their state files (scheduler,
+        # /chay and the web button may all ask at once).
+        self._lock = threading.RLock()
+        # The real book: written only by /khop and /von, read by the runs. Separate,
+        # so a report of a fill is not kept waiting for a whole session run.
+        self._real_lock = threading.Lock()
+        self._start_guard = threading.Lock()
         self._running = threading.Event()
 
     # ── books ──
@@ -69,23 +320,58 @@ class TradingBot:
     def momentum_book(self):
         from tradingagents.trading.ledger import Ledger
 
-        return Ledger.load(self.momentum_path, self.settings.paper_capital)
+        # A damaged paper book is moved aside (kept) and restarted.
+        return Ledger.load(self.momentum_path, self.settings.paper_capital, fresh_on_error=True)
 
     def paper(self):
         from tradingagents.trading.ledger import Ledger
 
-        return Ledger.load(self.paper_path, self.settings.paper_capital)
+        return Ledger.load(self.paper_path, self.settings.paper_capital, fresh_on_error=True)
 
     def real(self):
-        from tradingagents.trading.ledger import Ledger
+        """The real book; raises LedgerLoadError when its file is damaged (never emptied).
 
-        return Ledger.load(self.real_path, 0.0)
+        The ledger moves a damaged file aside; until its owner restores it (or deletes
+        the copy to start over) the book stays refused, rather than coming back empty
+        on the next load and being overwritten by the next /von or /khop."""
+        from tradingagents.trading.ledger import Ledger, LedgerLoadError
+
+        path = self.real_path
+        if not path.exists():
+            aside = sorted(path.parent.glob(f"{path.name}.corrupt-*"))
+            if aside:
+                raise LedgerLoadError(
+                    f"Sổ tài khoản thật bị hỏng, đã chuyển sang {aside[-1].name} (không xoá). "
+                    f"Khôi phục file đó thành {path.name}, hoặc xoá nó để bắt đầu sổ mới.")
+        return Ledger.load(path, 0.0)
+
+    def _real_for_update(self):
+        from tradingagents.trading.ledger import LedgerLoadError
+
+        try:
+            return self.real()
+        except LedgerLoadError as exc:
+            raise ValueError(str(exc)) from exc
 
     def last_signals(self) -> dict:
         try:
             return json.loads((self.dir / "signals.json").read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return {}
+
+    def last_report(self) -> dict:
+        try:
+            data = json.loads((self.dir / "last_report.json").read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
+    def last_day(self) -> str:
+        """The last session both paper books have processed ("" before the first run)."""
+        return min(_book_day(self.paper()), _book_day(self.momentum_book()))
+
+    def _write_json(self, name: str, data) -> None:
+        write_text_atomic(self.dir / name, json.dumps(data, ensure_ascii=False))
 
     # ── the basket ──
     def universe(self) -> list[str]:
@@ -101,121 +387,203 @@ class TradingBot:
                 out.append(code)
         return out
 
-    # ── one session ──
+    # ── the sessions ──
     def run_day(self, day: str) -> str:
-        """Settle ``day`` on the paper book, decide, place tomorrow's orders. Returns the report."""
-        from tradingagents.dataflows.errors import VendorError
-        from tradingagents.dataflows.ohlcv import load_ohlcv
-        from tradingagents.market import vn_rules
-        from tradingagents.quant import engine
-        from tradingagents.quant.params import active
-        from tradingagents.trading.ledger import Bar, Signal
+        """Bring the books up to ``day`` (every missed session first). Returns the report."""
+        return self.catch_up(day).text
 
+    def catch_up(self, day: str) -> RunResult:
+        """Process, in order, every final VNINDEX session after each book's last day up to
+        ``day``; place the next session's orders; report on the last one."""
         with self._lock:
-            params = active()
-            paper, real, mom_book = self.paper(), self.real(), self.momentum_book()
-            last = self.last_report()
-            if paper.meta.get("last_day") == day and last.get("day") == day:
-                # Already settled: running a session twice would count its bar twice.
-                return last["text"]
-            frames: dict = {}
+            self._running.set()
+            try:
+                return self._catch_up(day)
+            finally:
+                self._running.clear()
 
-            def frame_of(symbol):
-                if symbol not in frames:
-                    try:
-                        frames[symbol] = load_ohlcv(symbol, day)
-                    except VendorError as exc:
-                        logger.warning("Bot: no bars for %s on %s: %s", symbol, day, exc)
-                        frames[symbol] = None
-                return frames[symbol]
+    def _catch_up(self, day: str) -> RunResult:
+        from tradingagents.market import vn_rules
+        from tradingagents.quant.params import active
 
-            def bar_of(symbol):
-                frame = frame_of(symbol)
-                if frame is None or frame["Date"].iloc[-1].strftime("%Y-%m-%d") != day:
-                    return None            # suspended today
-                row, prev = frame.iloc[-1], (float(frame["Close"].iloc[-2]) if len(frame) > 1 else None)
-                return Bar(day, float(row["Open"]), float(row["High"]), float(row["Low"]), float(row["Close"]), prev)
+        params = active()
+        paper, mom_book = self.paper(), self.momentum_book()
+        real, real_error = self._real_snapshot()
+        market = _Market(min(day, final_day()))
+        sessions = market.sessions(vn_rules.BENCHMARK)     # VNINDEX unreadable: raise, retried later
+        if not sessions:
+            raise RuntimeError(f"VNINDEX không có phiên nào tới {market.as_of}")
+        target = sessions[-1]
+        p_todo, p_skipped = _pending(sessions, _book_day(paper))
+        m_todo, m_skipped = _pending(sessions, _book_day(mom_book))
+        last = self.last_report()
+        if not p_todo and not m_todo:
+            if last.get("day") == target and last.get("text"):
+                return RunResult(target, last["text"])
+            if _book_day(paper) != target or _book_day(mom_book) != target:
+                ahead = max(_book_day(paper), _book_day(mom_book))
+                return RunResult(target, f"✅ Phiên {target} đã xử lý (sổ đang ở phiên {ahead}).")
+            # Both books are at the target but its report was lost (a crash before writing it):
+            # rebuild it from the books, without processing anything again.
 
-            touched = ({o.symbol for o in paper.orders} | set(paper.positions) | set(real.positions)
-                       | {o.symbol for o in mom_book.orders} | set(mom_book.positions))
-            bars = {s: b for s in touched if (b := bar_of(s)) is not None}
-            fills = paper.process_session({s: bars[s] for s in bars}, params=params)
-            vni = frame_of(vn_rules.BENCHMARK)
-            bench = float(vni["Close"].iloc[-1]) if vni is not None else None
-            paper.end_of_session(day, bench)
+        universe = self.universe() if p_todo else None
+        engine_out: dict = {}
+        for s in p_todo:
+            engine_out = self._engine_session(s, sessions, paper, real, market, universe, params, final=s == target)
+        mom_decision = None
+        for s in m_todo:
+            mom_decision = self._momentum_session(s, sessions, mom_book, market, params)
 
-            # Decisions: the paper book decides holdings; a stock held only in the
-            # real book is judged again as a holding for the real signals.
-            symbols = list(dict.fromkeys(self.universe() + list(paper.positions) + list(real.positions)))
-            signals, real_only, errors = [], {}, []
-            book = paper.portfolio_context()
-            for symbol in symbols:
-                try:
-                    result = engine.analyze(symbol, day, portfolio=book, params=params)
-                    signals.append(Signal.from_result(result))
-                    if symbol in real.positions and symbol not in paper.positions:
-                        real_only[symbol] = Signal.from_result(
-                            engine.analyze(symbol, day, portfolio=real.portfolio_context(), params=params))
-                except Exception as exc:  # noqa: BLE001 - one stock must not stop the session
-                    errors.append(f"{symbol}: {exc}")
-                    logger.warning("Bot: %s on %s failed: %s", symbol, day, exc)
-            orders = paper.plan_orders(day, signals, max_positions=params.max_positions)
-            paper.meta["last_day"] = day
-            paper.save(self.paper_path)
-            (self.dir / "signals.json").write_text(json.dumps(
-                {"day": day, "signals": {s.symbol: s.__dict__ for s in signals}}, ensure_ascii=False), encoding="utf-8")
+        if engine_out.get("day") == target:
+            signals, real_only, errors = engine_out["signals"], engine_out["real_only"], engine_out["errors"]
+        else:
+            # The engine book was already at the target (a run resumed after a failure):
+            # its decisions were saved; analyse again only if they were not.
+            signals, real_only, errors = self._saved_signals(target)
+            if signals is None:
+                signals, real_only, errors = self._signals_for(
+                    target, paper, real, self.universe() if universe is None else universe, params)
+        if mom_decision is None:
+            mom_decision = self._decision_from_meta(mom_book, params)
 
-            text = self._paper_report(day, paper, fills, orders, signals, errors)
-            mom_text, mom_decision = self._momentum_session(day, mom_book, bars, frame_of, vni, bench, params)
-            text += "\n\n" + mom_text + "\n\n" + self._comparison(paper, mom_book)
-            if self.settings.trade_mode == "signal":
+        text = self._paper_report(target, paper, [f for f in paper.fills if f.date == target],
+                                  [o for o in paper.orders if o.created == target], signals, errors)
+        text += "\n\n" + self._momentum_text(target, mom_book, mom_decision, params)
+        text += "\n\n" + self._comparison(paper, mom_book)
+        if self.settings.trade_mode == "signal":
+            if real is None:
+                text += f"\n\n⚠️ Không đọc được tài khoản thật: {real_error}"
+            else:
+                real.settle_to(target)               # shares bought T+2 ago are sellable (report only)
+                bars = {s: b for s in real.positions if (b := market.bar(s, target)) is not None}
                 if self.settings.signal_strategy == "momentum":
-                    text += "\n\n" + self._real_momentum_report(day, real, bars, mom_decision, frame_of, params)
+                    text += "\n\n" + self._real_momentum_report(target, real, bars, mom_decision, market, params)
                 else:
-                    text += "\n\n" + self._real_report(day, real, bars, signals, real_only, params)
-            from datetime import datetime
+                    text += "\n\n" + self._real_report(target, real, bars, signals, real_only, params)
+        done = sorted(set(p_todo) | set(m_todo))
+        earlier = [s for s in done if s != target]
+        head = []
+        if earlier:
+            head.append(f"⏪ Chạy bù {len(earlier)} phiên bị lỡ: {', '.join(earlier)}"
+                        + self._missed_fills(earlier, paper, mom_book))
+        if p_skipped or m_skipped:
+            head.append(f"⚠️ Bỏ qua {max(p_skipped, m_skipped)} phiên cũ hơn (chỉ chạy bù tối đa {MAX_CATCH_UP} "
+                        "phiên); lệnh chờ của các phiên đó đã huỷ.")
+        if head:
+            text = "\n".join(head) + "\n\n" + text
+        self._write_json("last_report.json", {"day": target, "text": text,
+                                              "at": _now_vn().isoformat(timespec="minutes"),
+                                              "sessions": done})
+        # A rebuilt report (books done, report lost) was never sent either: it is new too.
+        return RunResult(target, text, bool(done) or last.get("day") != target, done)
 
-            (self.dir / "last_report.json").write_text(json.dumps(
-                {"day": day, "text": text, "at": datetime.now().isoformat(timespec="minutes")},
-                ensure_ascii=False), encoding="utf-8")
-            return text
+    def _saved_signals(self, day: str):
+        from tradingagents.trading.ledger import Signal
 
-    def last_report(self) -> dict:
+        saved = self.last_signals()
+        if saved.get("day") != day or not isinstance(saved.get("signals"), dict):
+            return None, {}, []
         try:
-            return json.loads((self.dir / "last_report.json").read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return {}
+            return [Signal(**v) for v in saved["signals"].values()], {}, []
+        except TypeError:
+            return None, {}, []
+
+    def _real_snapshot(self):
+        from tradingagents.trading.ledger import LedgerLoadError
+
+        with self._real_lock:
+            try:
+                return self.real(), ""
+            except LedgerLoadError as exc:
+                logger.error("Real book unreadable: %s", exc)
+                return None, str(exc)
+
+    def _engine_session(self, day, sessions, paper, real, market, universe, params, *, final) -> dict:
+        """One session of the Quant Engine's book: settle, decide, plan, save."""
+        from tradingagents.market import vn_rules
+
+        prev = sessions[sessions.index(day) - 1] if sessions.index(day) else None
+        _expire(paper, prev)
+        touched = {o.symbol for o in paper.orders} | set(paper.positions)
+        # A held stock whose source does not answer stops the run (retried later) rather
+        # than pass for suspended: its stop would be skipped and its order lost.
+        bars = {s: b for s in touched if (b := market.bar(s, day, required=True)) is not None}
+        paper.process_session(bars, params=params)
+        paper.end_of_session(day, market.close(vn_rules.BENCHMARK, day))
+        signals, real_only, errors = self._signals_for(day, paper, real if final else None, universe, params)
+        paper.plan_orders(day, signals, max_positions=params.max_positions)
+        paper.meta["last_day"] = day
+        paper.save(self.paper_path)
+        if final:
+            self._write_json("signals.json", {"day": day, "signals": {s.symbol: s.__dict__ for s in signals}})
+        return {"day": day, "signals": signals, "real_only": real_only, "errors": errors}
+
+    def _signals_for(self, day, paper, real, universe, params):
+        """The engine's decisions on ``day`` for the basket, the paper holdings and (when
+        ``real`` is given) the real holdings, the latter judged again as holdings."""
+        from tradingagents.quant import engine
+        from tradingagents.trading.ledger import Signal
+
+        held_real = list(real.positions) if real is not None else []
+        symbols = list(dict.fromkeys(list(universe) + list(paper.positions) + held_real))
+        signals, real_only, errors, down = [], {}, [], []
+        book = paper.portfolio_context()
+        for symbol in symbols:
+            try:
+                result = engine.analyze(symbol, day, portfolio=book, params=params)
+                signals.append(Signal.from_result(result))
+                if symbol in held_real and symbol not in paper.positions:
+                    real_only[symbol] = Signal.from_result(
+                        engine.analyze(symbol, day, portfolio=real.portfolio_context(), params=params))
+            except Exception as exc:  # noqa: BLE001 - one stock must not stop the session
+                errors.append(f"{symbol}: {exc}")
+                if _unavailable(exc):
+                    down.append(symbol)
+                logger.warning("Bot: %s on %s failed: %s", symbol, day, exc)
+        held_down = [s for s in down if s in paper.positions or s in held_real]
+        if held_down or len(down) > MAX_UNAVAILABLE_SHARE * len(symbols):
+            # Raised before the session is saved: the scheduler retries it once the
+            # sources answer, instead of a session saved with half its decisions.
+            raise RuntimeError(f"Nguồn giá không trả lời cho {len(down)}/{len(symbols)} mã "
+                               f"({', '.join(down[:5])}{', ...' if len(down) > 5 else ''}) - phiên {day} "
+                               "chưa lưu, sẽ chạy lại.")
+        return signals, real_only, errors
 
     # ── on demand (/chay, the web button) ──
     def session_day(self) -> str:
-        """The last closed session: today after the close, else the previous one (holidays skipped)."""
+        """The last final session: today from 15:05, else the previous one (holidays skipped)."""
         from tradingagents.dataflows.ohlcv import load_ohlcv
         from tradingagents.market import vn_rules
 
-        today = vn_rules.now_vn().strftime("%Y-%m-%d")
-        frame = load_ohlcv(vn_rules.BENCHMARK, today)     # drops today's bar while the session runs
+        frame = load_ohlcv(vn_rules.BENCHMARK, final_day(), fill_gaps=False)
         return frame["Date"].iloc[-1].strftime("%Y-%m-%d")
 
     @property
     def running(self) -> bool:
         return self._running.is_set()
 
+    def is_done(self, day: str) -> bool:
+        return (min(_book_day(self.paper()), _book_day(self.momentum_book())) >= day
+                and self.last_report().get("day") == day)
+
     def start_run(self, notify=None) -> str:
         """Run the last closed session in the background; the report goes to ``notify``."""
         notify = notify or self.notify
-        if self._running.is_set():
-            return "⏳ Bot đang chạy một phiên, đợi vài phút."
-        try:
-            day = self.session_day()
-        except Exception as exc:  # noqa: BLE001
-            return f"⚠️ Không đọc được dữ liệu VNINDEX: {exc}"
-        if self.paper().meta.get("last_day") == day and self.last_report().get("day") == day:
-            return f"✅ Phiên {day} đã chạy rồi - xem /danhmuc, /lenh hoặc trang /bot."
-        self._running.set()
+        with self._start_guard:
+            if self._running.is_set():
+                return "⏳ Bot đang chạy một phiên, đợi vài phút."
+            try:
+                day = self.session_day()
+            except Exception as exc:  # noqa: BLE001
+                return f"⚠️ Không đọc được dữ liệu VNINDEX: {exc}"
+            if self.is_done(day):
+                return f"✅ Phiên {day} đã chạy rồi - xem /danhmuc, /lenh hoặc trang /bot."
+            self._running.set()
 
         def work():
             try:
-                notify(self.run_day(day))
+                result = self.catch_up(day)
+                notify(result.text if result.new else f"✅ Phiên {day} đã chạy rồi - xem /danhmuc hoặc /lenh.")
             except Exception as exc:  # noqa: BLE001
                 logger.exception("On-demand session %s failed", day)
                 notify(f"❌ Bot giao dịch lỗi phiên {day}: {exc}")
@@ -226,24 +594,47 @@ class TradingBot:
         return f"▶️ Đang chạy phiên {day} cho hai tài khoản ảo (khoảng 1 phút); báo cáo sẽ gửi khi xong."
 
     # ── the momentum book ──
-    def _momentum_session(self, day, book, bars, frame_of, vni, bench, params):
+    def _momentum_session(self, day, sessions, book, market, params):
+        """One session of the momentum book: settle, rank, plan, save. Returns the decision."""
         from tradingagents.dataflows import money_flows as mf
+        from tradingagents.market import vn_rules
         from tradingagents.trading import momentum
 
-        fills = book.process_session({s: b for s, b in bars.items() if s in book.positions or
-                                      any(o.symbol == s for o in book.orders)}, rules=momentum.RULES)
-        book.end_of_session(day, bench)
+        prev = sessions[sessions.index(day) - 1] if sessions.index(day) else None
+        _expire(book, prev)
+        touched = {o.symbol for o in book.orders} | set(book.positions)
+        bars = {s: b for s in touched if (b := market.bar(s, day, required=True)) is not None}
+        book.process_session(bars, rules=momentum.RULES)
+        book.end_of_session(day, market.close(vn_rules.BENCHMARK, day))
         need = params.mom_lookback + 1
         closes = {}
         for symbol in mf.index_members("VN30"):
-            frame = frame_of(symbol)
-            if frame is None or frame["Date"].iloc[-1].strftime("%Y-%m-%d") != day:
+            frame = market.frame(symbol, day)
+            if frame is None or not len(frame) or frame["Date"].iloc[-1].strftime("%Y-%m-%d") != day:
                 continue
             closes[symbol] = [float(c) for c in frame["Close"].tail(need)]
+        vni = market.frame(vn_rules.BENCHMARK, day)
         vni_closes = [float(c) for c in vni["Close"].tail(params.mom_market_ma)] if vni is not None else []
         decision = momentum.decide(book, closes, vni_closes, params)
-        orders = momentum.plan(book, day, decision, {s: c[-1] for s, c in closes.items()}, params)
+        momentum.plan(book, day, decision, {s: c[-1] for s, c in closes.items()}, params)
+        book.meta["last_day"] = day
         book.save(self.momentum_path)
+        return decision
+
+    @staticmethod
+    def _decision_from_meta(book, params):
+        """The decision of the book's last session, from the state ``momentum.decide`` kept."""
+        from tradingagents.trading.momentum import Decision
+
+        meta = book.meta
+        ok = bool(meta.get("mom_market_ok", False))
+        note = "" if ok else f"VNINDEX dưới MA{params.mom_market_ma} - giữ tiền mặt"
+        return Decision(ok, int(meta.get("mom_since", 1) or 0) == 0 and ok, list(meta.get("mom_basket") or []),
+                        note=note)
+
+    def _momentum_text(self, day, book, decision, params) -> str:
+        fills = [f for f in book.fills if f.date == day]
+        orders = [o for o in book.orders if o.created == day]
         st = book.stats()
         bench_txt = f" | VNINDEX {st['benchmark_pct']:+.2f}%" if st["benchmark_pct"] is not None else ""
         lines = [f"🚀 BOT ĐỘNG LƯỢNG {day}",
@@ -251,14 +642,24 @@ class TradingBot:
                  f"sụt giảm tối đa {st['max_drawdown_pct']:.2f}%",
                  ("Thị trường: VNINDEX trên MA" if decision.market_ok else "Thị trường: VNINDEX dưới MA")
                  + f"{params.mom_market_ma} | rổ: " + (", ".join(decision.basket) or "tiền mặt")
-                 + (f" ({decision.note})" if decision.rebalanced or not decision.market_ok else "")]
+                 + (f" ({decision.note})" if decision.note and (decision.rebalanced or not decision.market_ok) else "")]
+        lines += _adjustment_lines(book, day)
         if fills:
             lines += [f"- Khớp {f.side} {f.symbol} {_fmt(f.qty)} @ {_fmt(f.price)} ({f.reason})"
                       + (f", lãi/lỗ {_bn(f.pnl)}" if f.pnl is not None else "") for f in fills]
         if orders:
             lines += [f"- Lệnh phiên tới: {'MUA' if o.side == 'BUY' else 'BÁN'} {o.symbol} {_fmt(o.qty)} giá mở cửa ({o.reason})"
                       for o in orders]
-        return "\n".join(lines), decision
+        return "\n".join(lines)
+
+    @staticmethod
+    def _missed_fills(days, paper, mom_book) -> str:
+        wanted = set(days)
+        lines = []
+        for title, book in (("Quant Engine", paper), ("Động lượng", mom_book)):
+            lines += [f"\n- {f.date} {title}: {f.side} {f.symbol} {_fmt(f.qty)} @ {_fmt(f.price)} ({f.reason})"
+                      for f in book.fills if f.date in wanted]
+        return "".join(lines) if lines else " (không có lệnh khớp)"
 
     @staticmethod
     def _comparison(engine_book, mom_book) -> str:
@@ -266,15 +667,15 @@ class TradingBot:
         return (f"📊 So sánh: Quant Engine {a['return_pct']:+.2f}% (DD {a['max_drawdown_pct']:.1f}%) | "
                 f"Động lượng {b['return_pct']:+.2f}% (DD {b['max_drawdown_pct']:.1f}%)")
 
-    def _real_momentum_report(self, day, real, bars, decision, frame_of, params) -> str:
+    def _real_momentum_report(self, day, real, bars, decision, market, params) -> str:
         from tradingagents.trading import momentum
         from tradingagents.trading.ledger import Ledger
 
         lines = ["📣 TÍN HIỆU THẬT - ĐỘNG LƯỢNG (tự đặt lệnh, rồi báo /khop)"]
         for symbol, pos in real.positions.items():
             bar = bars.get(symbol)
-            if bar is not None and pos.stop and bar.low <= pos.stop:
-                lines.append(f"- ⛔ {symbol}: chạm stop {_fmt(pos.stop)} - đề xuất BÁN {_fmt(pos.qty)} cp")
+            if bar is not None and bar.tradable and pos.stop and bar.low <= pos.stop:
+                lines.append(f"- ⛔ {symbol}: chạm stop {_fmt(pos.stop)} - {_sell_advice(pos, day)}")
         if real.cash <= 0 and not real.positions:
             lines.append("Chưa có vốn tài khoản thật: gửi /von 500000000 để bot tính khối lượng.")
             return "\n".join(lines)
@@ -282,12 +683,16 @@ class TradingBot:
         draft.orders = []
         last = {}
         for symbol in set(decision.basket) | set(real.positions):
-            frame = frame_of(symbol)
-            if frame is not None:
-                last[symbol] = float(frame["Close"].iloc[-1])
+            close = market.close(symbol, day)
+            if close is not None:
+                last[symbol] = close
         orders = momentum.plan(draft, day, decision, last, params)
-        lines += [f"- {'MUA' if o.side == 'BUY' else 'BÁN'} {o.symbol} {_fmt(o.qty)} cp giá mở cửa ({o.reason})"
-                  for o in orders]
+        for o in orders:
+            pos = real.positions.get(o.symbol)
+            if o.side == "SELL" and pos is not None and _pending_lots(pos, day):
+                lines.append(f"- BÁN {o.symbol}: {_sell_advice(pos, day, when=' giá mở cửa')} ({o.reason})")
+            else:
+                lines.append(f"- {'MUA' if o.side == 'BUY' else 'BÁN'} {o.symbol} {_fmt(o.qty)} cp giá mở cửa ({o.reason})")
         if len(lines) == 1:
             lines.append("Không đổi danh mục phiên tới.")
         return "\n".join(lines)
@@ -302,6 +707,7 @@ class TradingBot:
             lines.append("Khớp hôm nay:")
             lines += [f"- {f.side} {f.symbol} {_fmt(f.qty)} @ {_fmt(f.price)} ({f.reason})"
                       + (f", lãi/lỗ {_bn(f.pnl)}" if f.pnl is not None else "") for f in fills]
+        lines += _adjustment_lines(paper, day)
         if paper.positions:
             lines.append("Đang giữ:")
             for p in paper.positions.values():
@@ -328,13 +734,18 @@ class TradingBot:
         lines = ["📣 TÍN HIỆU CHO TÀI KHOẢN THẬT (tự đặt lệnh, rồi báo /khop)"]
         for symbol, pos in real.positions.items():
             bar = bars.get(symbol)
+            if bar is not None and not bar.tradable:
+                bar = None
             sig = real_only.get(symbol) or next((s for s in signals if s.symbol == symbol), None)
+            pending = _pending_lots(pos, day)
             if bar is not None and pos.stop and bar.low <= pos.stop:
-                lines.append(f"- ⛔ {symbol}: chạm stop {_fmt(pos.stop)} hôm nay - đề xuất BÁN {_fmt(pos.qty)} cp")
-            elif bar is not None and pos.target1 and not pos.t1_done and bar.high >= pos.target1:
-                lines.append(f"- 🎯 {symbol}: chạm T1 {_fmt(pos.target1)} - đề xuất bán 1/2, dời stop về hoà vốn")
+                lines.append(f"- ⛔ {symbol}: chạm stop {_fmt(pos.stop)} hôm nay - {_sell_advice(pos, day)}")
+            elif bar is not None and pos.target1 and not pos.t1_done and bar.high > pos.target1:
+                # Traded THROUGH T1, as the ledger's resting limit needs (``_target_fill``).
+                lines.append(f"- 🎯 {symbol}: chạm T1 {_fmt(pos.target1)} - đề xuất bán 1/2, dời stop về hoà vốn"
+                             + (f" ({_t2_note(pending, day)})" if pending else ""))
             elif sig is not None and sig.action == "SELL":
-                lines.append(f"- 🔻 {symbol}: hệ thống chuyển SELL - đề xuất bán {_fmt(pos.qty)} cp phiên tới")
+                lines.append(f"- 🔻 {symbol}: hệ thống chuyển SELL - {_sell_advice(pos, day, verb='bán', when=' phiên tới')}")
         if real.cash <= 0 and not real.positions:
             lines.append("Chưa có vốn tài khoản thật: gửi /von 500000000 để bot tính khối lượng.")
             return "\n".join(lines)
@@ -350,60 +761,88 @@ class TradingBot:
         return "\n".join(lines)
 
     # ── the real book, updated by its owner ──
-    def record_fill(self, side: str, symbol: str, qty: int, price: float, day: str) -> str:
-        from tradingagents.market import vn_rules
-        from tradingagents.trading.ledger import Fill, Position, _fee
+    @staticmethod
+    def _fill_day(day: str | None, last: str) -> str:
+        """The fill's session: default today (Vietnam time); a weekday, not in the future,
+        not before the last fill already recorded (the book is kept in date order)."""
+        raw = (day or "").strip() or today_vn()
+        try:
+            parsed = _date.fromisoformat(raw[:10]) if len(raw) == 10 else None
+        except ValueError:
+            parsed = None
+        if parsed is None:
+            raise ValueError(f"Ngày khớp không hợp lệ: {raw!r}. Dùng dạng YYYY-MM-DD.")
+        text = parsed.isoformat()
+        if text > today_vn():
+            raise ValueError(f"Ngày khớp {text} ở tương lai (hôm nay {today_vn()}).")
+        if parsed.weekday() >= 5:
+            raise ValueError(f"{text} là cuối tuần, không có phiên giao dịch.")
+        if last and text < last:
+            raise ValueError(f"Ngày khớp {text} trước lệnh đã ghi gần nhất ({last}); "
+                             "báo các lệnh theo đúng thứ tự ngày.")
+        return text
 
-        side = side.upper()
-        if qty <= 0 or qty % vn_rules.LOT_SIZE:
-            raise ValueError("Khối lượng phải là bội số của 100.")
-        with self._lock:
-            real = self.real()
+    def record_fill(self, side: str, symbol: str, qty: int, price: float, day: str | None = None) -> str:
+        """Book a fill the owner made at the broker (/khop). Raises ValueError with a
+        Vietnamese message, leaving the book untouched, when it cannot have happened."""
+        from tradingagents.market import vn_rules
+
+        side = {"MUA": "BUY", "BAN": "SELL", "BÁN": "SELL"}.get(str(side).strip().upper(), str(side).strip().upper())
+        if side not in ("BUY", "SELL"):
+            raise ValueError("Dùng: /khop mua|ban MÃ KHỐI_LƯỢNG GIÁ [YYYY-MM-DD]")
+        symbol = str(symbol).strip().upper()
+        if isinstance(qty, bool) or not _finite(qty) or float(qty) != int(float(qty)) or int(float(qty)) <= 0 \
+                or int(float(qty)) % vn_rules.LOT_SIZE:
+            raise ValueError(f"Khối lượng phải là bội số dương của {vn_rules.LOT_SIZE} cổ phiếu.")
+        qty = int(float(qty))
+        if not _finite(price) or float(price) <= 0:
+            raise ValueError("Giá khớp không hợp lệ.")
+        price = float(price)
+        with self._real_lock:
+            real = self._real_for_update()
+            day = self._fill_day(day, str(real.meta.get("last_day") or ""))
+            stop = target1 = target2 = None
             if side == "BUY":
-                sig = (self.last_signals().get("signals") or {}).get(symbol, {})
                 if self.settings.signal_strategy == "momentum":
-                    from tradingagents.market import vn_rules
                     from tradingagents.quant.params import active
 
                     pct = active().mom_stop_pct
-                    sig = {"stop": vn_rules.round_to_tick(price * (1 - pct / 100)) if pct else 0}
-                value = qty * price
-                fee = _fee(value, "BUY")
-                old = real.positions.get(symbol)
-                if old:
-                    total = old.qty + qty
-                    old.avg_price = (old.avg_price * old.qty + value + fee) / total
-                    old.qty = total
+                    stop = vn_rules.round_to_tick(price * (1 - pct / 100)) if pct else None
                 else:
-                    real.positions[symbol] = Position(
-                        symbol=symbol, qty=qty, avg_price=(value + fee) / qty, buy_date=day,
-                        stop=float(sig.get("stop") or 0), target1=sig.get("target1"), target2=sig.get("target2"),
-                        last_price=price)
-                real.cash -= value + fee
-                real.fills.append(Fill(day, symbol, "BUY", qty, price, round(fee), "báo khớp"))
-                pos = real.positions[symbol]
-                if self.settings.signal_strategy == "momentum":
-                    note = (f"stop {_fmt(pos.stop)}" if pos.stop else "giữ tới khi rời rổ động lượng")
-                else:
-                    note = (f"stop {_fmt(pos.stop)}, T1 {_fmt(pos.target1)}" if pos.stop
-                            else "chưa có stop (không có tín hiệu BUY gần nhất)")
-                text = f"✅ Đã ghi MUA {symbol} {_fmt(qty)} @ {_fmt(price)}; {note}."
-            elif side == "SELL":
-                pos = real.positions.get(symbol)
-                if pos is None or pos.qty < qty:
-                    raise ValueError(f"Tài khoản thật không có đủ {symbol} để bán.")
-                fill = real._sell(pos, qty, price, day, "báo khớp")
-                text = f"✅ Đã ghi BÁN {symbol} {_fmt(qty)} @ {_fmt(price)}; lãi/lỗ {_bn(fill.pnl)}."
-            else:
-                raise ValueError("Dùng: /khop mua|ban MÃ KHỐI_LƯỢNG GIÁ")
+                    sig = (self.last_signals().get("signals") or {}).get(symbol) or {}
+                    stop = float(sig["stop"]) if _finite(sig.get("stop")) and sig["stop"] > 0 else None
+                    target1 = float(sig["target1"]) if _finite(sig.get("target1")) else None
+                    target2 = float(sig["target2"]) if _finite(sig.get("target2")) else None
+            held = real.positions.get(symbol)
+            t1_before = bool(held and held.t1_done)
+            fill = real.record_fill(side, symbol, qty, price, day, stop=stop, target1=target1, target2=target2,
+                                    reason="báo khớp")
+            real.meta["last_day"] = max(day, str(real.meta.get("last_day") or ""))
             real.save(self.real_path)
-            return text
+        if side == "BUY":
+            pos = real.positions[symbol]
+            if self.settings.signal_strategy == "momentum":
+                note = f"stop {_fmt(pos.stop)}" if pos.stop else "giữ tới khi rời rổ động lượng"
+            else:
+                note = (f"stop {_fmt(pos.stop)}, T1 {_fmt(pos.target1)}" if pos.stop
+                        else "chưa có stop (không có tín hiệu BUY gần nhất)")
+            return (f"✅ Đã ghi MUA {symbol} {_fmt(qty)} @ {_fmt(price)} ngày {day}; {note}. "
+                    f"Bán được từ chiều T+2. Tiền còn {_fmt(real.cash)}.")
+        text = f"✅ Đã ghi BÁN {symbol} {_fmt(qty)} @ {_fmt(price)} ngày {day}; lãi/lỗ {_bn(fill.pnl)}."
+        pos = real.positions.get(symbol)
+        if pos is not None and pos.t1_done and not t1_before:
+            text += f" Đã chốt T1: stop phần còn lại ({_fmt(pos.qty)} cp) dời về hoà vốn {_fmt(pos.stop)}."
+        return text
 
     def set_capital(self, cash: float) -> str:
-        if cash <= 0:
-            raise ValueError("Vốn phải lớn hơn 0.")
-        with self._lock:
-            real = self.real()
+        """Set the real book's cash (/von), as the broker shows it."""
+        if isinstance(cash, bool) or not _finite(cash) or float(cash) <= 0:
+            raise ValueError("Vốn phải là một số lớn hơn 0.")
+        if float(cash) > 1e13:
+            raise ValueError("Số vốn quá lớn - kiểm tra lại (nhập theo đồng, ví dụ 500000000).")
+        cash = float(cash)
+        with self._real_lock:
+            real = self._real_for_update()
             real.cash = cash
             if not real.positions:
                 real.start_cash = cash
@@ -412,6 +851,8 @@ class TradingBot:
 
     # ── status ──
     def portfolio_text(self) -> str:
+        from tradingagents.trading.ledger import LedgerLoadError
+
         paper = self.paper()
         s = paper.stats()
         lines = [f"🤖 Paper: NAV {_fmt(s['nav'])} ({s['return_pct']:+.2f}%), tiền {_fmt(paper.cash)}, "
@@ -425,9 +866,15 @@ class TradingBot:
         lines += [f"- {p.symbol} {_fmt(p.qty)} @ {_fmt(p.avg_price)} → {_fmt(p.last_price)}"
                   for p in mom.positions.values()] or ["- (không giữ mã nào)"]
         if self.settings.trade_mode == "signal":
-            real = self.real()
+            try:
+                real = self.real()
+            except LedgerLoadError as exc:
+                lines.append(f"💼 Thật: ⚠️ {exc}")
+                return "\n".join(lines)
+            real.settle_to(today_vn())
             lines.append(f"💼 Thật: tiền {_fmt(real.cash)}")
             lines += [f"- {p.symbol} {_fmt(p.qty)} @ {_fmt(p.avg_price)}, stop {_fmt(p.stop)}, T1 {_fmt(p.target1)}"
+                      + ("" if p.settled_qty >= p.qty else f" [{_fmt(p.settled_qty)} cp đã về]")
                       for p in real.positions.values()] or ["- (chưa ghi vị thế nào)"]
         return "\n".join(lines)
 
@@ -459,9 +906,12 @@ class TradingBot:
 
     # ── nightly ──
     def calibrate(self, day: str) -> str:
+        """Calibrate on the sessions up to ``day``, which must be a final one (never past
+        the last session the books processed)."""
         from tradingagents.dataflows import money_flows as mf
         from tradingagents.trading import calibrate as cal, simulator as sim
 
+        day = min(day, final_day())
         symbols = list(dict.fromkeys(self.universe() + mf.index_members("VN30")))
         data = sim.build_dataset(symbols, cal.TRAIN_SESSIONS + cal.HOLDOUT_SESSIONS, day)
         out = []

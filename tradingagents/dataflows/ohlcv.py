@@ -6,8 +6,8 @@ Sources are tried in the order configured in ``data_vendors.core_stock_apis``
 - is in VND (stocks) or index points, adjusted by the source for dividends and
   bonus issues as of today;
 - holds no row after the requested date (no look-ahead);
-- holds no forming bar: during today's session (9:00-15:00) the provider's
-  bar for today is still moving, so a run dated today ends at yesterday's close;
+- holds no forming bar: until today's bar is final (15:05) the provider's bar
+  for today may still move, so a run dated today ends at yesterday's close;
 - is rejected as stale when its latest row is far older than the requested date.
 """
 
@@ -15,7 +15,10 @@ from __future__ import annotations
 
 import logging
 import os
-from collections.abc import Iterable
+import threading
+import time
+from collections.abc import Callable, Iterable
+from datetime import datetime, time as dtime
 
 import pandas as pd
 
@@ -35,6 +38,15 @@ MAX_OHLCV_STALE_DAYS = 12
 # How long a same-day download may be reused for a run dated today, so an
 # intraday run picks up the close soon after the session ends.
 OHLCV_CACHE_TTL_SECONDS = 900
+
+# A session's bar is final from here on (ATC ends 14:45, put-through 15:00):
+# a file written earlier on that day may hold a forming bar.
+FINAL_AFTER = dtime(15, 5)
+
+# A source that just failed to answer is skipped for a while: each failed
+# download waits out its timeouts and retries (~30 s), and a run reads the same
+# source hundreds of times.
+BREAKER_SECONDS = 300
 
 HISTORY_YEARS = 5
 COLUMNS = ["Date", "Open", "High", "Low", "Close", "Volume"]
@@ -64,23 +76,77 @@ def _cache_file(canonical: str, source: str) -> str:
     return os.path.join(directory, f"{safe_ticker_component(canonical)}-{source}-ohlcv.csv")
 
 
+def _written_vn(path: str) -> datetime:
+    """When ``path`` was written, in Vietnam time (the host clock may be UTC)."""
+    return datetime.fromtimestamp(os.path.getmtime(path), vn_rules.VN_TZ)
+
+
 def _cache_is_fresh(path: str, as_of: pd.Timestamp, today: pd.Timestamp) -> bool:
-    """A download serves the day it was made; a run dated today also refetches after the TTL."""
-    written = pd.Timestamp.fromtimestamp(os.path.getmtime(path))
-    if written.normalize() != pd.Timestamp.now().normalize():
+    """A download serves the Vietnam day it was made; a run dated today also refetches after the TTL.
+
+    A download made before the bar was final (during the session, or before
+    15:05) is not reused for a run dated today once the session has closed.
+    """
+    written = _written_vn(path)
+    now = vn_rules.now_vn()
+    if written.date() != now.date():
         return False
     if as_of < today:
         return True
-    return (pd.Timestamp.now() - written).total_seconds() <= OHLCV_CACHE_TTL_SECONDS
+    if written.time() < FINAL_AFTER <= now.time():
+        return False
+    return (now - written).total_seconds() <= OHLCV_CACHE_TTL_SECONDS
+
+
+def _final_through(written: datetime) -> pd.Timestamp:
+    """The last day whose bar was final when a file was written at ``written``."""
+    day = pd.Timestamp(written.date())
+    return day if written.time() >= FINAL_AFTER else day - pd.Timedelta(days=1)
+
+
+_breaker_lock = threading.Lock()
+_down_until: dict[tuple[str, Callable], float] = {}
+
+
+def reset_breaker() -> None:
+    with _breaker_lock:
+        _down_until.clear()
 
 
 def _download(canonical: str, source: str) -> pd.DataFrame:
+    """One source's history, through a per-source breaker.
+
+    The breaker is keyed by the fetcher itself, so a replaced fetcher (another
+    config, a test's fake) starts with it closed.
+    """
+    fetch = _fetchers()[source]
+    key = (source, fetch)
+    with _breaker_lock:
+        down = time.time() < _down_until.get(key, 0.0)
+    if down:
+        raise VendorUnavailableError(f"{source} failed recently; not asked again yet")
     today = _today()
     start = (today - pd.DateOffset(years=HISTORY_YEARS)).strftime("%Y-%m-%d")
-    frame = _fetchers()[source](canonical, start, today.strftime("%Y-%m-%d"))
+    try:
+        frame = fetch(canonical, start, today.strftime("%Y-%m-%d"))
+    except VendorUnavailableError:
+        with _breaker_lock:
+            _down_until[key] = time.time() + BREAKER_SECONDS
+        raise
     if frame is None or frame.empty:
         raise NoMarketDataError(canonical, canonical, f"{source} returned no price rows")
     return frame[COLUMNS]
+
+
+def _read_cache(path: str) -> pd.DataFrame | None:
+    """The cached bars, or None when the file is missing, unreadable or incomplete."""
+    try:
+        cached = pd.read_csv(path, encoding="utf-8")
+    except (OSError, ValueError):   # pandas' EmptyDataError and ParserError are ValueErrors
+        return None
+    if cached.empty or not set(COLUMNS) <= set(cached.columns):
+        return None
+    return cached[COLUMNS]
 
 
 def _read_source(canonical: str, source: str, as_of: pd.Timestamp) -> pd.DataFrame:
@@ -88,26 +154,39 @@ def _read_source(canonical: str, source: str, as_of: pd.Timestamp) -> pd.DataFra
 
     The analysts, the quant engine and the sector peers ask for the same symbol
     at the same time, so one caller downloads while the others wait and then
-    read its file, instead of each downloading and replacing it in turn.
+    read its file, instead of each downloading and replacing it in turn. When
+    the source cannot answer, an older file still serves a day whose bar was
+    already final when it was written.
     """
     path = _cache_file(canonical, source)
     with locked(path):
-        if os.path.exists(path) and _cache_is_fresh(path, as_of, _today()):
-            cached = pd.read_csv(path, encoding="utf-8")
-            if not cached.empty and set(COLUMNS) <= set(cached.columns):
-                return cached[COLUMNS]
-        frame = _download(canonical, source)
+        exists = os.path.exists(path)
+        if exists and _cache_is_fresh(path, as_of, _today()):
+            cached = _read_cache(path)
+            if cached is not None:
+                return cached
+        try:
+            frame = _download(canonical, source)
+        except VendorUnavailableError:
+            if exists and _final_through(_written_vn(path)) >= as_of:
+                cached = _read_cache(path)
+                if cached is not None:
+                    logger.info("Price source %s unavailable; %s served from its earlier file", source, canonical)
+                    return cached
+            raise
         replace_file(path, lambda temp: frame.to_csv(temp, index=False, encoding="utf-8"))
         return frame
 
 
 def drop_forming_bar(frame: pd.DataFrame, as_of: pd.Timestamp, now=None) -> pd.DataFrame:
-    """Drop today's bar while today's session can still move it."""
+    """Drop today's bar until it is final (``FINAL_AFTER``, 15:05): during the session
+    it still moves, and up to 15:05 the provider may not have its close yet. The same
+    boundary as the cache rules, so a 14:50 snapshot is never served as the close."""
     if frame.empty:
         return frame
-    now = now or vn_rules.now_vn()
+    now = (now or vn_rules.now_vn()).astimezone(vn_rules.VN_TZ)
     today = pd.Timestamp(now.date())
-    if as_of >= today and frame["Date"].iloc[-1] == today and vn_rules.is_market_hours(now):
+    if as_of >= today and frame["Date"].iloc[-1] == today and now.time() < FINAL_AFTER:
         return frame.iloc[:-1]
     return frame
 

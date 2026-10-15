@@ -29,9 +29,10 @@ def test_a_buy_fills_next_session_in_lots_and_cannot_be_sold_before_t_plus_2():
     # T+1 touches the stop: not sellable yet.
     book.process_bar("FPT", Bar("2026-01-07", 48_000, 48_500, 46_000, 46_500, 50_200))
     assert "FPT" in book.positions
-    # T+2: sellable, the stop (gapped below) fills at the open.
+    # T+2: the shares arrive in the afternoon, so the stop is judged on the close
+    # and fills there, less slippage (45.500 -0.1% -> 45.450 on the tick grid), not at the open.
     fills = book.process_bar("FPT", Bar("2026-01-08", 45_000, 46_000, 44_500, 45_500, 46_500))
-    assert fills[0].side == "SELL" and fills[0].price == 45_000 and fills[0].pnl < 0
+    assert fills[0].side == "SELL" and fills[0].price == 45_450 and fills[0].pnl < 0
     assert "FPT" not in book.positions
 
 
@@ -78,7 +79,9 @@ def test_a_sell_signal_exits_at_the_next_open_and_the_book_round_trips(tmp_path)
     book.save(path)
     again = Ledger.load(path, 0)
     fills = again.process_bar("FPT", Bar("2026-01-08", 49_500, 50_000, 49_000, 49_800, 50_000))
-    assert fills[0].price == 49_500 and fills[0].reason == "hệ thống chuyển SELL"
+    # 2026-01-08 is T+2 of the buy: the SELL can only fill in the afternoon, at the
+    # close less slippage (49.800 -0.1% -> 49.750), not at the T+2 open.
+    assert fills[0].price == 49_750 and fills[0].reason == "hệ thống chuyển SELL"
 
 
 @pytest.mark.unit
@@ -294,9 +297,12 @@ def test_a_quiet_holdout_does_not_block_a_change_that_wins_on_training(tmp_path,
     data = _dataset()
     n = len(cal.neighbours(qp.DEFAULT))
     good = sim.Score(10, None, 1, 10, 60, 9.5)
-    flat = sim.Score(0, None, 0, 0, None, 0)            # risk-off holdout: nobody traded
+    flat = sim.Score(0, None, 0, 0, None, 0)            # risk-off holdout: the champion did not trade
     base = sim.Score(0, None, 0, 8, None, 0)
-    scores = iter([base, flat] + [good] + [base] * (n - 1) + [flat])
+    # The challenger must itself trade on the holdout (a challenger that stops trading
+    # proves nothing); the champion's quiet holdout must not veto it.
+    trades = sim.Score(0.5, None, 0.5, 2, 50, 0.25)
+    scores = iter([base, flat] + [good] + [base] * (n - 1) + [trades])
     monkeypatch.setattr(sim, "score", lambda ledger: next(scores))
     report = cal.calibrate(["AAA"], data.dates[-1], data=data)
     assert report.accepted is not None

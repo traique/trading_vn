@@ -4,6 +4,7 @@ No network and no LLM: the engine and the graph are stubbed; Telegram calls
 are recorded instead of sent.
 """
 
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pandas as pd
@@ -442,6 +443,16 @@ def trader(settings, monkeypatch):
     monkeypatch.setattr(money_flows, "index_members", lambda group="VN30": ["FPT", "HPG"])
     decisions = {"FPT": "BUY", "HPG": "WATCH"}
     monkeypatch.setattr(engine, "analyze", lambda s, d, portfolio=None, params=None: _result(s, decisions.get(s, "NO_TRADE")))
+    # A fixed clock (the T+2 afternoon of the 2026-10-14 buy) and no network: the
+    # tests must not depend on the calendar date (fills dated in the future are refused).
+    import vnbot.trader as trader_mod
+    from tradingagents.dataflows.vendors import vci
+
+    frozen = datetime(2026, 10, 16, 15, 30, tzinfo=timezone(timedelta(hours=7)))
+    monkeypatch.setattr(trader_mod, "_now_vn", lambda: frozen)
+    monkeypatch.setattr(service, "today_vn", lambda: "2026-10-16")
+    monkeypatch.setattr(vci, "fetch_listing", lambda: [{"symbol": "FPT", "board": "HOSE"},
+                                                       {"symbol": "HPG", "board": "HOSE"}])
     bot = TradingBot(settings, Watchlist(settings))
     monkeypatch.setattr(bot, "universe", lambda: ["FPT", "HPG"])
     bot.decisions = decisions
@@ -474,7 +485,7 @@ def test_signal_mode_suggests_real_orders_and_records_reported_fills(trader, set
     assert "stop 47.000" in text
     real = trader.real()
     assert real.positions["FPT"].qty == 1000 and real.cash < 200_000_000 - 50_100_000
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="đủ FPT để bán"):   # the oversell guard, not the date check
         trader.record_fill("SELL", "FPT", 5000, 51_000, "2026-10-16")
     assert "lãi/lỗ" in trader.record_fill("SELL", "FPT", 1000, 51_000, "2026-10-16")
 
@@ -506,6 +517,22 @@ def test_the_bot_page_shows_the_book_and_the_thresholds(settings, queue, trader)
     assert "Quant Engine" in page and "Động lượng VN30" in page and "So sánh hai chiến lược" in page and "FPT" in page
     assert "confidence_buy_min" in page and "mom_lookback" in page
     assert "/bot" in client.get("/").text
+
+
+@pytest.mark.unit
+def test_the_bot_page_and_help_show_when_the_bot_really_runs(settings, queue, trader):
+    # Regression: the page showed DAILY_REPORT_TIME (the watchlist run), not TRADE_TIME.
+    from vnbot.telegram_bot import TelegramBot
+
+    object.__setattr__(settings, "web_password", "s3cret")
+    object.__setattr__(settings, "daily_report_time", "08:30")
+    object.__setattr__(settings, "trade_time", "16:00")
+    client = TestClient(create_app(settings, queue, Watchlist(settings), trader=trader))
+    client.auth = ("u", "s3cret")
+    page = client.get("/bot").text
+    assert "tự chạy lúc 16:00" in page and "tự chạy 08:30" not in page
+    assert "lúc 16:00, hoặc bấm" in page and "15:30" not in page
+    assert "không đợi 16:00" in TelegramBot(settings, queue, Watchlist(settings))._help()
 
 
 @pytest.mark.unit

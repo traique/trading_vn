@@ -152,14 +152,31 @@ def _live_quote_line(symbol: str, as_of_date: str, price: float) -> str | None:
     )
 
 
-def _estimated_nav(portfolio, price: float) -> float | None:
+def _estimated_nav(portfolio, price: float, symbol: str | None = None) -> float | None:
+    """Cash plus holdings: the analysed symbol at its current close ``price``,
+    other positions at cost (the only price the portfolio carries for them)."""
     if portfolio is None or getattr(portfolio, "cash", None) is None:
         return None
     nav = float(portfolio.cash)
+    held = portfolio.position_in(symbol) if symbol and hasattr(portfolio, "position_in") else None
     for position in portfolio.positions:
-        if position.average_price:
+        if held is not None and position is held and price > 0:
+            nav += float(position.quantity) * float(price)
+        elif position.average_price:
             nav += float(position.quantity) * float(position.average_price)
     return nav if nav > 0 else None
+
+
+def _suggested_shares(portfolio, nav: float | None, position_pct: float, entry_high: float) -> int | None:
+    """Board-lot shares for the plan's % NAV, capped by the free cash: a VN cash
+    account cannot buy more than its cash at the top of the entry zone."""
+    if not nav:
+        return None
+    shares = vn_rules.shares_for(nav, position_pct, entry_high)
+    cash = getattr(portfolio, "cash", None)
+    if cash is not None and entry_high > 0:
+        shares = min(shares, vn_rules.round_lot(max(float(cash), 0.0) / entry_high))
+    return shares
 
 
 @dataclass
@@ -324,9 +341,8 @@ def analyze(symbol: str, as_of_date: str, *, portfolio=None, params=None, flows:
     ceiling, floor = vn_rules.ceiling_floor(price, exchange) if exchange else (None, None)
     plan = decision.trade_plan
     shares = None
-    nav = _estimated_nav(portfolio, price)
-    if plan is not None and nav:
-        shares = vn_rules.shares_for(nav, plan.position_size_pct, plan.entry_high)
+    if plan is not None:
+        shares = _suggested_shares(portfolio, _estimated_nav(portfolio, price, code), plan.position_size_pct, plan.entry_high)
     sector_perf = sector.sector_performance(code, as_of_date, vni_closes)
 
     result = QuantResult(

@@ -334,11 +334,13 @@ _CHART_JS = """<script>
 </script>"""
 
 
-def nav_chart(dates: list[str], series: list[dict]) -> str:
-    """Indexed (start = 100) lines on one axis. ``series``: {name, color (css), values, dashed}."""
+def nav_chart(dates: list[str], series: list[dict], *, run_time: str | None = None) -> str:
+    """Indexed (start = 100) lines on one axis. ``series``: {name, color (css), values, dashed};
+    ``run_time``: when the bot runs each day (HH:MM), for the empty-chart hint."""
     if len(dates) < 2:
+        when = f"mỗi ngày lúc {html.escape(run_time)}" if run_time else "sau mỗi phiên"
         return ('<p class="muted small" style="margin:0">Biểu đồ NAV xuất hiện sau 2 phiên giao dịch của bot '
-                '(mỗi ngày lúc 15:30, hoặc bấm “Chạy phiên ngay”).</p>')
+                f'({when}, hoặc bấm “Chạy phiên ngay”).</p>')
     w, h, left, right, top, bottom = 680, 270, 48, 172, 16, 32
     values = [v for s in series for v in s["values"] if v is not None]
     lo, hi = min(values + [100.0]), max(values + [100.0])

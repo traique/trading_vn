@@ -2,14 +2,21 @@
 
 import math
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 _VN_TZ = ZoneInfo("Asia/Ho_Chi_Minh")
 _OUTLIER_DAILY_MOVE_PCT = 35.0
 MIN_BARS_HARD_FLOOR = 20
 DEFAULT_MIN_BARS = 30
-DEFAULT_MAX_STALE_CALENDAR_DAYS = 9
+# Tết closes the market for 10 calendar days (last session Fri 2026-02-13 ->
+# reopen Mon 2026-02-23; same in 2022/2025), so a 9-calendar-day limit flagged
+# the reopening-day analysis as stale and blocked BUY. Staleness is counted in
+# weekdays (holidays are not modelled): the longest Tết break misses 6 weekdays
+# counting the reopening day itself, a frame that stopped updating a week and a
+# half ago misses 7+. The calendar limit matches dataflows.ohlcv.MAX_OHLCV_STALE_DAYS.
+DEFAULT_MAX_STALE_CALENDAR_DAYS = 12
+DEFAULT_MAX_STALE_WEEKDAYS = 6
 
 
 @dataclass
@@ -39,6 +46,19 @@ def _parse_date(value):
         return datetime.strptime(value, "%Y-%m-%d").date()
     except (ValueError, TypeError):
         return None
+
+
+def _weekdays_after(last, today):
+    """Mon-Fri dates in (last, today]: sessions the frame may be missing."""
+    days = (today - last).days
+    if days <= 0:
+        return 0
+    full_weeks, rest = divmod(days, 7)
+    count = full_weeks * 5
+    for offset in range(1, rest + 1):
+        if (last + timedelta(days=offset)).weekday() < 5:
+            count += 1
+    return count
 
 
 def _finite(value):
@@ -102,6 +122,7 @@ def validate_ohlcv(
     min_bars=DEFAULT_MIN_BARS,
     max_stale_days=DEFAULT_MAX_STALE_CALENDAR_DAYS,
     now=None,
+    max_stale_weekdays=DEFAULT_MAX_STALE_WEEKDAYS,
 ):
     n = len(closes)
     errors = ohlcv_contract_errors(closes, highs, lows, volumes, dates)
@@ -120,8 +141,10 @@ def validate_ohlcv(
     stale = False
     outlier = False
     if dates:
-        age = ((now or datetime.now(_VN_TZ)).date() - _parse_date(dates[-1])).days
-        if age > max_stale_days:
+        today = (now or datetime.now(_VN_TZ)).date()
+        last = _parse_date(dates[-1])
+        age = (today - last).days
+        if age > max_stale_days or _weekdays_after(last, today) > max_stale_weekdays:
             stale = True
             reasons.append(f"dữ liệu cũ - phiên gần nhất cách đây {age} ngày")
     for previous, current in zip(closes, closes[1:], strict=False):

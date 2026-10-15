@@ -7,14 +7,18 @@ return make the basket, equal weight. While VNINDEX closes under its
 the book waits in cash; the day it closes back above, a new ranking is made.
 
 Orders go at the next session's open through the same ledger as the Quant
-Engine's book (lots of 100, T+2 before a sale, fees and tax, no fills on
-limit-locked sessions). A stock that leaves the basket is sold; one that stays
-is not resized, which keeps turnover (and fees) down. ``mom_stop_pct`` adds a
-stop under each entry.
+Engine's book, with its rules (see ``ledger``): lots of 100, fees and tax,
+slippage on every fill, no fills on limit-locked sessions, and T+2 - a stock
+bought on T can leave on T+2 only at the close (a SELL order or the stop is
+then filled at the close), from T+3 at the open. A stock that leaves the
+basket is sold; one that stays is not resized, which keeps turnover (and
+fees) down. ``mom_stop_pct`` adds a stop under each entry.
 
-Backtest over 01/2022-10/2026 on today's VN30 (survivorship flatters it):
-about +73% with a 24% max drawdown, VNINDEX +14%; it lagged VNINDEX in the
-2024-2026 rise. Past results do not promise future ones.
+Backtest over 01/2022-10/2026 on today's VN30 (survivorship flatters it),
+measured before slippage and the T+2 afternoon rule were modelled: about +73%
+with a 24% max drawdown, VNINDEX +14%; it lagged VNINDEX in the 2024-2026
+rise. Expect somewhat less now that fills are costed. Past results do not
+promise future ones.
 """
 
 from __future__ import annotations
@@ -75,8 +79,11 @@ def plan(ledger: Ledger, day: str, decision: Decision, last_close: dict[str, flo
     orders: list[Order] = []
     basket = set(decision.basket)
     proceeds = 0.0
+    # A symbol that already has an open order of a side gets no second one (a day planned twice).
+    open_sells = {o.symbol for o in ledger.orders if o.side == "SELL"}
+    open_buys = {o.symbol for o in ledger.orders if o.side == "BUY"}
     for symbol, pos in ledger.positions.items():
-        if symbol not in basket:
+        if symbol not in basket and symbol not in open_sells:
             reason = "VNINDEX dưới MA - về tiền mặt" if not decision.market_ok else "rời rổ động lượng"
             orders.append(Order(symbol, "SELL", pos.qty, None, day, reason))
             proceeds += pos.qty * (last_close.get(symbol) or pos.last_price)
@@ -86,7 +93,7 @@ def plan(ledger: Ledger, day: str, decision: Decision, last_close: dict[str, flo
 
     weight = 1 / max(params.mom_top_k, 1)
     for symbol in decision.basket:
-        if symbol in ledger.positions or not last_close.get(symbol):
+        if symbol in ledger.positions or symbol in open_buys or not last_close.get(symbol):
             continue
         price = last_close[symbol]
         budget = min(nav * weight, available)

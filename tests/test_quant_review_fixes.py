@@ -67,7 +67,10 @@ def test_khong_co_khang_cu_that_thi_target_uoc_luong_khong_mo_buy(monkeypatch):
 def test_khang_cu_gan_hon_1r_duoc_ton_trong(monkeypatch):
     inputs = _forced_buy_inputs(monkeypatch, 1.02)
     decision = pol.evaluate_policy(inputs)
-    assert decision.target_price == feat.round_order_price(round(inputs.price * 1.02))
+    # T1 is the highest valid price AT OR BELOW the resistance (it used to
+    # round to the nearest tick, which could land one tick above the level).
+    assert decision.target_price == pol._target_at_or_below(round(inputs.price * 1.02))
+    assert decision.target_price <= round(inputs.price * 1.02)
     assert decision.action == "WATCH"
     assert decision.rr_ratio < pol.MIN_RR_RATIO
 

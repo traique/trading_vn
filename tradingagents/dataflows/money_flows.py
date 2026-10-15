@@ -44,6 +44,9 @@ RECENT_DAYS = 120           # what an analysis fetches when the cache is empty
 # a year of calibration plus the 50-session average, not more.
 BREADTH_HISTORY_DAYS = 760
 RECHECK_SECONDS = 3600      # a day already asked for and not served is not asked again sooner
+# Market flows join two CafeF series; a recent day saved with one side missing
+# (published later, or one endpoint briefly empty) is asked for again this long.
+REFILL_DAYS = 7
 PUBLISHED_AFTER = dtime(15, 30)
 
 # Exchange-traded funds whose creations/redemptions show domestic and foreign
@@ -134,8 +137,13 @@ def _write_meta(path: str, meta: dict) -> None:
     _write_text(f"{path}.json", json.dumps(meta))
 
 
-def _ensure(path: str, fetch: Callable[[str, str], pd.DataFrame], backfill: bool) -> pd.DataFrame:
-    """The cached series, extended to the last published day (and back in time if backfilling)."""
+def _ensure(path: str, fetch: Callable[[str, str], pd.DataFrame], backfill: bool,
+            refill_days: int = 0) -> pd.DataFrame:
+    """The cached series, extended to the last published day (and back in time if backfilling).
+
+    With ``refill_days``, a cached day that recent with a missing value is
+    fetched again (throttled like any other recheck) until the vendor fills it.
+    """
     end = published_through()
     first_wanted = end - pd.Timedelta(days=HISTORY_DAYS if backfill else RECENT_DAYS)
     with locked(path):
@@ -151,8 +159,14 @@ def _ensure(path: str, fetch: Callable[[str, str], pd.DataFrame], backfill: bool
                 asked_end == end.strftime("%Y-%m-%d")
                 and time.time() - float(meta.get("asked_at", 0)) < RECHECK_SECONDS
             )
-            if last < end and not recently_asked:
-                ranges.append((last + pd.Timedelta(days=1), end))
+            lo = last + pd.Timedelta(days=1) if last < end else None
+            if refill_days and not recently_asked:
+                recent = cached[cached["Date"] >= end - pd.Timedelta(days=refill_days)]
+                holes = recent.loc[recent.drop(columns=["Date"]).isna().any(axis=1), "Date"]
+                if not holes.empty:
+                    lo = min(holes.iloc[0], lo) if lo is not None else holes.iloc[0]
+            if lo is not None and lo <= end and not recently_asked:
+                ranges.append((lo, end))
             if backfill and first > first_wanted + pd.Timedelta(days=7) and not meta.get("history_complete"):
                 ranges.append((first_wanted, first - pd.Timedelta(days=1)))
         if not ranges:
@@ -166,8 +180,10 @@ def _ensure(path: str, fetch: Callable[[str, str], pd.DataFrame], backfill: bool
                 logger.warning("Flow data %s %s..%s unavailable: %s", os.path.basename(path), lo.date(), hi.date(), exc)
                 failed = True
         frames = [p for p in parts if p is not None and not p.empty]
+        # A day fetched again takes the new values, but a value the vendor
+        # leaves out this time does not erase the one cached.
         merged = (
-            pd.concat(frames).drop_duplicates("Date", keep="last").sort_values("Date").reset_index(drop=True)
+            pd.concat(frames).groupby("Date", sort=True).last().reset_index()
             if frames else pd.DataFrame()
         )
         if not merged.empty:
@@ -213,7 +229,8 @@ def load_stock_flows(symbol: str, as_of: str, *, backfill: bool = False) -> pd.D
 def load_market_flows(as_of: str, *, backfill: bool = False) -> pd.DataFrame:
     """Market-wide daily foreign and proprietary net value (VND), up to ``as_of``."""
     frame = _ensure(os.path.join(_dir(), "market-flows.csv"),
-                    lambda s, e: _guarded("CafeF", lambda: _vendor().fetch_market_flows(s, e)), backfill)
+                    lambda s, e: _guarded("CafeF", lambda: _vendor().fetch_market_flows(s, e)), backfill,
+                    refill_days=REFILL_DAYS)
     return _upto(frame, as_of)
 
 
@@ -274,8 +291,52 @@ def _breadth_row(day: pd.Timestamp, bars: pd.DataFrame) -> dict:
     }
 
 
-def _merge_breadth(rows: list[dict], close_rows: list[pd.Series]) -> None:
-    """Add fetched sessions to the two breadth files, under their lock."""
+# A cached close this far from its next session's reference price is on an
+# older adjustment basis (a dividend or bonus issue went ex since it was saved).
+REBASE_TOLERANCE = 0.001
+
+
+def _rebase(closes: pd.DataFrame, new_refs: pd.DataFrame | None, sessions: list[pd.Timestamp] | None) -> pd.DataFrame:
+    """The cached closes put on the adjustment basis of the sessions just fetched.
+
+    VNDirect adjusts ``adClose`` for corporate actions as of the day it is asked,
+    so a session saved before an ex-date sits on an older basis than one saved
+    after it. A fetched session's reference price (close - change, on the same
+    basis as its ``adClose``) is the adjusted close of the session before it:
+    where that session is cached, the ratio of the two rescales the code's cached
+    history. Without the previous session cached, the basis cannot be told and
+    the history is left as it is.
+    """
+    if closes.empty or new_refs is None or new_refs.empty or not sessions:
+        return closes
+    closes = closes.set_index("Date").sort_index()
+    order = sorted(set(sessions))
+    ratios: dict[str, float] = {}
+    for day in sorted(new_refs.index, reverse=True):          # the newest junction sets the basis
+        earlier = [d for d in order if d < day]
+        if not earlier or earlier[-1] not in closes.index:
+            continue
+        prev = pd.to_numeric(closes.loc[earlier[-1]], errors="coerce")
+        refs = pd.to_numeric(new_refs.loc[day], errors="coerce")
+        for code, ref in refs.items():
+            if code in ratios or code not in prev.index:
+                continue
+            base = prev[code]
+            if pd.notna(ref) and ref > 0 and pd.notna(base) and base > 0:
+                ratios[code] = float(ref / base)
+    for code, ratio in ratios.items():
+        if abs(ratio - 1) > REBASE_TOLERANCE:
+            closes[code] = pd.to_numeric(closes[code], errors="coerce") * ratio
+    return closes.reset_index()
+
+
+def _merge_breadth(rows: list[dict], close_rows: list[pd.Series], ref_rows: list[pd.Series] | None = None,
+                   sessions: list[pd.Timestamp] | None = None) -> None:
+    """Add fetched sessions to the two breadth files, under their lock.
+
+    The cached closes are first rescaled to the fetched sessions' adjustment
+    basis (see ``_rebase``), so the matrix never mixes bases across an ex-date.
+    """
     breadth_path, closes_path = _breadth_paths()
     with locked(breadth_path):
         breadth, closes = _read(breadth_path), _read(closes_path)
@@ -283,10 +344,20 @@ def _merge_breadth(rows: list[dict], close_rows: list[pd.Series]) -> None:
         breadth = breadth.sort_values("Date").reset_index(drop=True)
         new_closes = pd.DataFrame(close_rows)
         new_closes.index.name = "Date"
+        new_refs = pd.DataFrame(ref_rows) if ref_rows else None
+        closes = _rebase(closes, new_refs, sessions)
         closes = pd.concat([closes, new_closes.reset_index()]).drop_duplicates("Date", keep="last")
         closes = closes.sort_values("Date").reset_index(drop=True)
         replace_file(breadth_path, lambda t: breadth.to_csv(t, index=False, encoding="utf-8"))
         replace_file(closes_path, lambda t: closes.to_csv(t, index=False, encoding="utf-8"))
+
+
+def _adjusted_ref(day: pd.Timestamp, bars: pd.DataFrame) -> pd.Series:
+    """Each code's reference price (close - change) on the basis of its ``AdClose``."""
+    close = pd.to_numeric(bars["Close"], errors="coerce")
+    ref = close - pd.to_numeric(bars["Change"], errors="coerce")
+    factor = pd.to_numeric(bars["AdClose"], errors="coerce") / close.where(close > 0)
+    return pd.Series((ref * factor).to_numpy(), index=bars["Code"], name=day)
 
 
 BREADTH_FLUSH = 20   # sessions fetched between two saves (a long backfill survives a restart)
@@ -314,14 +385,16 @@ def load_breadth(as_of: str, *, backfill: bool = False) -> pd.DataFrame:
     recently = (meta.get("asked_end") == end.strftime("%Y-%m-%d")
                 and time.time() - float(meta.get("asked_at", 0)) < RECHECK_SECONDS)
     wanted: list[pd.Timestamp] = []
+    sessions: list[pd.Timestamp] = []
     if backfill or not recently:
         try:
-            wanted = [d for d in _sessions(first_wanted, end) if d not in have]
+            sessions = _sessions(first_wanted, end)
+            wanted = [d for d in sessions if d not in have]
         except VendorError as exc:
             logger.warning("Breadth: VNINDEX sessions unavailable: %s", exc)
     # An analysis tops up the latest five; a backfill goes newest first, so the useful end lands first.
     wanted = list(reversed(wanted)) if backfill else wanted[-5:]
-    rows, close_rows, failed = [], [], False
+    rows, close_rows, ref_rows, failed = [], [], [], False
     for day in wanted:
         try:
             bars = _guarded("VNDirect", lambda day=day: _vendor().fetch_hose_day(day.strftime("%Y-%m-%d")))
@@ -332,12 +405,13 @@ def load_breadth(as_of: str, *, backfill: bool = False) -> pd.DataFrame:
         if not bars.empty:
             rows.append(_breadth_row(day, bars))
             close_rows.append(pd.Series(bars["AdClose"].to_numpy(), index=bars["Code"], name=day))
+            ref_rows.append(_adjusted_ref(day, bars))
         if len(rows) >= BREADTH_FLUSH:
-            _merge_breadth(rows, close_rows)
-            rows, close_rows = [], []
+            _merge_breadth(rows, close_rows, ref_rows, sessions)
+            rows, close_rows, ref_rows = [], [], []
         time.sleep(0.2)
     if rows:
-        _merge_breadth(rows, close_rows)
+        _merge_breadth(rows, close_rows, ref_rows, sessions)
     if not failed:
         meta.update(asked_end=end.strftime("%Y-%m-%d"), asked_at=time.time())
         _write_meta(breadth_path, meta)

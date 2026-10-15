@@ -87,7 +87,10 @@ def detect_price_gaps(
     """Liệt kê các bước nhảy close-to-close vượt biên độ giao dịch một phiên.
 
     Biết sàn thì một bước nằm TRONG biên độ của sàn (UPCoM ±15%, HNX ±10%) là
-    giao dịch thật - trừ khi là phiên GIẢM khớp đúng tỷ lệ thưởng/chia tách."""
+    giao dịch thật, kể cả phiên GIẢM khớp tỷ lệ thưởng: trên UPCoM một phiên sàn
+    (-12,8% đến -15%) trùng với vùng tỷ lệ 1:6 (-14,29%) và chỉ nhìn giá đóng cửa
+    thì không phân biệt được. Gắn cờ những phiên đó làm policy khóa mọi tín hiệu
+    (kể cả SELL) suốt POLICY_LOOKBACK_BARS phiên sau mỗi phiên giảm sàn."""
     band = vn_rules.band_pct(exchange) if vn_rules.normalize_exchange(exchange) else None
     gaps: list[PriceGap] = []
     if not closes or len(closes) < 2:
@@ -101,7 +104,7 @@ def detect_price_gaps(
         magnitude = abs(move_pct)
         if magnitude < suspect_pct:
             continue
-        if band is not None and magnitude <= band + 0.5 and (move_pct > 0 or not _ratio_hint(move_pct)):
+        if band is not None and magnitude <= band + 0.5:
             continue
         level = "certain" if magnitude >= certain_pct else "suspect"
         date = dates[index] if dates and index < len(dates) else ""

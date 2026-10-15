@@ -5,6 +5,16 @@ policy inputs of every (stock, session) - the expensive part, independent of
 the thresholds. ``run`` then decides and trades with any ``Params`` in a few
 seconds, which is what lets the calibration try many candidate thresholds.
 
+Execution and indicators read different copies of the same bars: the policy
+inputs are computed on gap-filled prices (indicators need a continuous
+series), but the ``Bar`` the ledger fills orders on is the session as
+reported (``fill_gaps=False``). A forward-filled open/high/low would be
+yesterday's range pasted on today and could fill a limit or trigger a stop
+that never traded; such a session reaches the ledger with its missing prices
+as NaN, and the ledger treats it as a session without trading
+(``Bar.tradable``). No look-ahead: the decision on session D reads bars up to
+D only, and its orders fill on a later session.
+
 Known limits (said so in every calibration report): bars are adjusted for
 corporate actions as of today; the basket is today's VN30 plus the
 watchlist (survivorship); news is not replayed (its only effect, a nudge to a
@@ -15,12 +25,13 @@ from __future__ import annotations
 
 import bisect
 import logging
+import math
 from dataclasses import dataclass, field, replace
 
 import pandas as pd
 
 from tradingagents.dataflows.errors import VendorError
-from tradingagents.dataflows.ohlcv import load_ohlcv
+from tradingagents.dataflows.ohlcv import COLUMNS as OHLCV_COLUMNS, load_ohlcv
 from tradingagents.dataflows.symbols import exchange_of
 from tradingagents.market import vn_rules
 from tradingagents.quant import engine, flow_features as ff, policy
@@ -49,6 +60,38 @@ def _upto(frame: pd.DataFrame | None, dates: list, day: pd.Timestamp) -> pd.Data
         return None
     end = bisect.bisect_right(dates, day)
     return frame.iloc[:end]
+
+
+def _raw_float(value) -> float:
+    """A reported price/volume as a float; NaN when missing (never filled)."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float("nan")
+
+
+def _bars(raw: pd.DataFrame, dates_ts: list, first: int, exchange: str | None) -> dict[str, Bar]:
+    """Execution bars from the bars as reported: no forward-filled open/high/low.
+
+    ``prev_close`` is the previous row's close (``load_ohlcv`` keeps only rows
+    with a close), which the ledger uses to tell a limit-locked session. A
+    reported volume of 0 marks a session without trading; a missing volume is
+    passed as unknown (None), so a vendor without volumes does not stop every fill.
+    """
+    bars: dict[str, Bar] = {}
+    closes = raw["Close"].astype(float).tolist()
+    volumes = raw["Volume"].tolist() if "Volume" in raw.columns else [None] * len(raw)
+    for i, day in enumerate(dates_ts):
+        if i < first:
+            continue
+        row = raw.iloc[i]
+        key = day.strftime("%Y-%m-%d")
+        volume = _raw_float(volumes[i])
+        bars[key] = Bar(
+            key, _raw_float(row["Open"]), _raw_float(row["High"]), _raw_float(row["Low"]),
+            closes[i], closes[i - 1] if i else None, exchange=exchange,
+            volume=volume if math.isfinite(volume) else None)
+    return bars
 
 
 def build_dataset(symbols: list[str], sessions: int, as_of: str, *, flows: bool = True) -> Dataset:
@@ -88,10 +131,16 @@ def build_dataset(symbols: list[str], sessions: int, as_of: str, *, flows: bool 
 
     for symbol in symbols:
         try:
-            frame = load_ohlcv(symbol, as_of)
+            raw = load_ohlcv(symbol, as_of, fill_gaps=False)
         except VendorError as exc:
             data.skipped[symbol] = str(exc)
             continue
+        # The indicators get the gap-filled copy load_ohlcv would give by default;
+        # the ledger gets the raw bars (see the module docstring).
+        frame = raw.copy()
+        filled = [c for c in OHLCV_COLUMNS[1:] if c in frame.columns]
+        frame[filled] = frame[filled].ffill().bfill()
+        frame.attrs = dict(raw.attrs)
         dates_ts = list(pd.to_datetime(frame["Date"]))
         exchange = exchange_of(symbol)
         stock_flow_frame = None
@@ -101,16 +150,8 @@ def build_dataset(symbols: list[str], sessions: int, as_of: str, *, flows: bool 
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Calibration: flows of %s unavailable: %s", symbol, exc)
         fd = list(stock_flow_frame["Date"]) if stock_flow_frame is not None and not stock_flow_frame.empty else []
-        bars: dict[str, Bar] = {}
-        closes = frame["Close"].astype(float).tolist()
         first = max(0, bisect.bisect_left(dates_ts, window[0]) - WARMUP_BARS)
-        for i, day in enumerate(dates_ts):
-            if i < first:
-                continue
-            row = frame.iloc[i]
-            bars[day.strftime("%Y-%m-%d")] = Bar(
-                day.strftime("%Y-%m-%d"), float(row["Open"]), float(row["High"]), float(row["Low"]),
-                float(row["Close"]), closes[i - 1] if i else None)
+        bars = _bars(raw, dates_ts, first, exchange)
         data.bars[symbol] = bars
         for day in window:
             key = day.strftime("%Y-%m-%d")

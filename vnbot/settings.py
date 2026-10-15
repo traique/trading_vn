@@ -7,6 +7,7 @@ config uses the provider chain, Vietnamese output and the VN data vendors.
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -14,6 +15,14 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 load_dotenv()
+
+logger = logging.getLogger(__name__)
+
+# A session's daily bar is final from 15:00 (end of the put-through window); the
+# providers publish it within minutes. The trading bot and the calibration never
+# run before this, so they only ever see final bars (see DailyScheduler).
+MIN_TRADE_TIME = "15:05"
+DEFAULT_TRADE_TIME = "15:30"
 
 
 def _int(name: str, default: int) -> int:
@@ -33,6 +42,26 @@ def _hhmm(name: str, default: str) -> str:
     except ValueError:
         pass
     return default
+
+
+def _trade_time(report_time: str) -> str:
+    """When the trading bot settles the day: TRADE_TIME, else the report time when it is
+    after the close, else 15:30. Never before MIN_TRADE_TIME: before the open today's
+    bar does not exist yet and during the session it is still moving, so a run then
+    would mistake every day for a holiday or every stock for suspended."""
+    raw = (os.environ.get("TRADE_TIME") or "").strip()
+    if raw:
+        value = _hhmm("TRADE_TIME", "")
+        if not value:
+            logger.warning("TRADE_TIME=%r is not HH:MM; using %s", raw, DEFAULT_TRADE_TIME)
+            value = DEFAULT_TRADE_TIME
+    else:
+        value = report_time if report_time >= MIN_TRADE_TIME else DEFAULT_TRADE_TIME
+    if value < MIN_TRADE_TIME:
+        logger.warning("TRADE_TIME %s is before the day's bar is final; the bot trades at %s instead",
+                       value, MIN_TRADE_TIME)
+        value = MIN_TRADE_TIME
+    return value
 
 
 def _flag(name: str, default: bool) -> bool:
@@ -66,7 +95,7 @@ class Settings:
     telegram_allowed_ids: frozenset[int]
     telegram_report_chat_ids: frozenset[int]
     watchlist_default: tuple[str, ...]
-    daily_report_time: str          # HH:MM, Vietnam time, weekdays
+    daily_report_time: str          # HH:MM, Vietnam time, weekdays: the watchlist analyses
     cache_max_age_days: int
     quick_model: str
     deep_model: str
@@ -80,6 +109,7 @@ class Settings:
     universe_vn30: bool = True      # trade VN30 (plus the watchlist)
     calibrate: bool = True          # nightly self-calibration of the thresholds
     signal_strategy: str = "momentum"   # which paper strategy the real signals follow
+    trade_time: str = DEFAULT_TRADE_TIME  # HH:MM, Vietnam time, >= MIN_TRADE_TIME: bot + calibration
     extra: dict = field(default_factory=dict)
 
 
@@ -92,6 +122,7 @@ def load() -> Settings:
     os.environ.setdefault("TRADINGAGENTS_MEMORY_LOG_PATH", str(data_dir / "memory" / "trading_memory.md"))
     os.environ.setdefault("TRADINGAGENTS_OUTPUT_LANGUAGE", "Vietnamese")
     allowed = _ids("TELEGRAM_ALLOWED_IDS") or _ids("ALLOWED_USER_ID")
+    report_time = _hhmm("DAILY_REPORT_TIME", "15:30")
     watch = tuple(
         s.strip().upper() for s in (os.environ.get("WATCHLIST") or "").split(",") if s.strip()
     )
@@ -104,7 +135,7 @@ def load() -> Settings:
         telegram_allowed_ids=allowed,
         telegram_report_chat_ids=_ids("TELEGRAM_REPORT_CHAT_IDS") or allowed,
         watchlist_default=watch,
-        daily_report_time=_hhmm("DAILY_REPORT_TIME", "15:30"),
+        daily_report_time=report_time,
         cache_max_age_days=_int("CACHE_MAX_AGE_DAYS", 3),
         quick_model=os.environ.get("QUICK_MODEL") or os.environ.get("ROUTER9_MODEL") or "default",
         deep_model=os.environ.get("DEEP_MODEL") or os.environ.get("ROUTER9_MODEL") or "default",
@@ -118,6 +149,7 @@ def load() -> Settings:
         universe_vn30=_flag("UNIVERSE_VN30", True),
         calibrate=_flag("AUTO_CALIBRATE", True),
         signal_strategy=_choice("SIGNAL_STRATEGY", ("momentum", "engine"), "momentum"),
+        trade_time=_trade_time(report_time),
     )
 
 

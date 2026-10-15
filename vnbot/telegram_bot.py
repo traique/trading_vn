@@ -8,19 +8,28 @@ Commands (Vietnamese, like lananh-main's bot):
     /theodoi [MÃ1,MÃ2,...]     show or set the daily watchlist
     /trangthai                 queue and AI provider status
     /danhmuc /lenh /hieuchinh  the trading bot: books, next session's orders, calibration
-    /khop mua|ban MÃ KL GIÁ    record a fill in the real book (signal mode)
+    /khop mua|ban MÃ KL GIÁ [NGÀY]  record a fill in the real book (signal mode)
     /von SỐ_TIỀN               set the real book's cash (signal mode)
     /id                        your Telegram id (to put in TELEGRAM_ALLOWED_IDS)
 
 Only ids in TELEGRAM_ALLOWED_IDS are served; the analyses cost LLM quota.
+
+Only new messages run commands: an edited message is ignored, so editing an
+old "/khop ..." never records the fill twice. Updates already handed out are
+remembered across restarts for the same reason. The bot token sits in every
+Bot API URL, so it is scrubbed from this module's log records and replies.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import threading
 import time
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 
 import requests
 
@@ -32,6 +41,58 @@ logger = logging.getLogger(__name__)
 
 API = "https://api.telegram.org/bot{token}/{method}"
 MAX_MESSAGE = 3900
+COMMAND_LANES = 3          # commands run on this many worker threads at most
+MAX_QUEUED_COMMANDS = 50   # beyond this a burst is dropped, not queued
+# Messages from ids not in TELEGRAM_ALLOWED_IDS never take one of those slots: at
+# most this many are queued at once, and each chat gets one reply per window.
+MAX_STRANGER_COMMANDS = 3
+STRANGER_REPLY_SECONDS = 300
+SEEN_KEPT = 1000           # update ids remembered across restarts
+# A Bot API token: "<bot id>:<35-ish url-safe characters>".
+_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9])\d{5,}:[A-Za-z0-9_-]{30,}")
+_SECRETS: set[str] = set()
+
+
+def redact(text) -> str:
+    """``text`` without any Telegram bot token (requests puts the URL in its errors)."""
+    text = str(text)
+    for secret in _SECRETS:
+        text = text.replace(secret, "<TOKEN>")
+    return _TOKEN_RE.sub("<TOKEN>", text)
+
+
+class _RedactFilter(logging.Filter):
+    """Scrubs the token from a record's message and traceback before any handler sees it."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            record.msg, record.args = redact(record.getMessage()), ()
+        except Exception:  # noqa: BLE001 - a bad format string still gets logged
+            record.msg = redact(record.msg)
+        if record.exc_info:
+            record.exc_text = redact(logging.Formatter().formatException(record.exc_info))
+            record.exc_info = None
+        elif record.exc_text:
+            record.exc_text = redact(record.exc_text)
+        return True
+
+
+_REDACT = _RedactFilter()
+
+
+def _install_redaction() -> None:
+    # This module's records, and urllib3's request lines ("POST /bot<token>/...") at DEBUG.
+    for name in (__name__, "urllib3.connectionpool"):
+        target = logging.getLogger(name)
+        if not any(isinstance(f, _RedactFilter) for f in target.filters):
+            target.addFilter(_REDACT)
+
+
+_install_redaction()
+
+
+class TelegramNetworkError(requests.RequestException):
+    """A Bot API request that did not get through, with the token removed from the message."""
 _MD_NOISE = re.compile(r"(\*\*|__|^#+\s*)", re.MULTILINE)
 
 HELP = (
@@ -44,20 +105,25 @@ HELP = (
     "/trangthai - hàng đợi và trạng thái các nhà cung cấp AI\n"
     "/danhmuc - danh mục bot (paper, và tài khoản thật nếu bật chế độ tín hiệu)\n"
     "/lenh - lệnh bot đặt cho phiên tới\n"
-    "/chay - chạy ngay phiên đã đóng gần nhất (không đợi 15:30)\n"
+    "/chay - chạy ngay phiên đã đóng gần nhất (không đợi {trade_time})\n"
     "/hieuchinh - ngưỡng đang dùng và kết quả tự hiệu chỉnh gần đây\n"
-    "/khop mua FPT 100 56300 - báo đã khớp lệnh thật (bán: /khop ban ...)\n"
+    "/khop mua FPT 100 56300 - báo đã khớp lệnh thật (bán: /khop ban ...; thêm ngày YYYY-MM-DD nếu khớp hôm trước)\n"
     "/von 500000000 - đặt tiền mặt tài khoản thật\n\n"
     "Hành động và mọi mức giá do hệ thống định lượng chốt; các agent AI chỉ diễn giải."
 )
 
 
 def _amount(text: str) -> float:
-    """A number typed the Vietnamese way: 56.300 or 56300 (dots and commas as thousands)."""
-    digits = re.sub(r"[.,\s_]", "", text or "")
-    if not digits.isdigit():
-        raise ValueError(f"Số không hợp lệ: {text!r}")
-    return float(digits)
+    """A number typed the Vietnamese way: 56.300 or 56300 (dots and commas as thousands).
+
+    Separators must split groups of three digits: "56.3" (thousands shorthand, or a
+    decimal) is refused rather than read as 563 đồng.
+    """
+    raw = re.sub(r"[\s_]", "", text or "")
+    groups = re.split(r"[.,]", raw)
+    if not raw or not all(g.isdigit() for g in groups) or any(len(g) != 3 for g in groups[1:]):
+        raise ValueError(f"Số không hợp lệ: {text!r}. Nhập số đầy đủ theo đồng, ví dụ 56300 hoặc 56.300.")
+    return float("".join(groups))
 
 
 def plain(text: str) -> str:
@@ -83,10 +149,27 @@ def chunks(text: str, size: int = MAX_MESSAGE) -> list[str]:
 class TelegramBot:
     def __init__(self, settings: Settings, jobs: JobQueue, watchlist: Watchlist):
         self.settings, self.jobs, self.watchlist = settings, jobs, watchlist
+        if len(settings.telegram_token or "") >= 10:
+            _SECRETS.add(settings.telegram_token)
         self._session = requests.Session()
         self._thread = threading.Thread(target=self._poll, name="telegram-bot", daemon=True)
         self.trader = None   # vnbot.trader.TradingBot, set by main_botkeep
+        # Commands of one chat run in order on one lane; a burst waits instead of
+        # spawning a thread per message (the host has 2 GB).
+        self._lanes = [ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"telegram-cmd-{i}")
+                       for i in range(COMMAND_LANES)]
+        self._queued = 0
+        self._queued_lock = threading.Lock()
+        self._strangers_queued = 0
+        self._stranger_replied: dict = {}      # chat id -> time.monotonic() of the last reply
+        self._seen_path = settings.data_dir / "telegram_seen.json"
+        self._seen: deque[int] = deque(self._load_seen(), maxlen=SEEN_KEPT)
         jobs.add_listener(self.on_job_event)
+
+    def _help(self) -> str:
+        from vnbot.settings import MIN_TRADE_TIME
+
+        return HELP.format(trade_time=max(self.settings.trade_time, MIN_TRADE_TIME))
 
     @property
     def enabled(self) -> bool:
@@ -108,7 +191,11 @@ class TelegramBot:
                     handle = value[1] if isinstance(value, tuple) else value
                     if hasattr(handle, "seek"):
                         handle.seek(0)
-            response = self._session.post(url, data=params, files=files, timeout=http_timeout)
+            try:
+                response = self._session.post(url, data=params, files=files, timeout=http_timeout)
+            except requests.RequestException as exc:
+                # ``from None``: the original carries the URL, so the token, in its text.
+                raise TelegramNetworkError(f"Telegram {method}: {redact(exc)}") from None
             try:
                 payload = response.json()
             except ValueError:
@@ -124,7 +211,7 @@ class TelegramBot:
         raise RuntimeError(f"Telegram {method}: still rate limited")
 
     def send(self, chat_id: int, text: str) -> None:
-        for part in chunks(text):
+        for part in chunks(redact(text)):
             try:
                 self._call("sendMessage", chat_id=chat_id, text=part, disable_web_page_preview="true")
             except Exception:  # noqa: BLE001 - delivery failures are logged, not fatal
@@ -146,19 +233,133 @@ class TelegramBot:
             logger.exception("Telegram sendDocument to %s failed", chat_id)
 
     # ── polling ──
+    def _load_seen(self) -> list[int]:
+        try:
+            return [int(x) for x in json.loads(self._seen_path.read_text(encoding="utf-8"))][-SEEN_KEPT:]
+        except (OSError, ValueError, TypeError):
+            return []
+
+    def _save_seen(self) -> None:
+        try:
+            self._seen_path.write_text(json.dumps(list(self._seen)), encoding="utf-8")
+        except OSError as exc:
+            logger.warning("Telegram: cannot save handled update ids: %s", exc)
+
+    def _accept(self, updates) -> tuple[int | None, list[dict]]:
+        """The next offset and the new messages of a getUpdates batch.
+
+        Every update id is marked handled (and saved) before any command runs:
+        a crash or restart mid-batch must not run "/khop" or "/von" twice when
+        Telegram hands the unconfirmed batch out again.
+        """
+        offset, messages = None, []
+        seen = set(self._seen)
+        for update in updates or []:
+            try:
+                update_id = int(update["update_id"])
+            except (KeyError, TypeError, ValueError):
+                logger.warning("Telegram: update without an id skipped")
+                continue
+            offset = max(offset or 0, update_id + 1)
+            if update_id in seen:
+                continue
+            seen.add(update_id)
+            self._seen.append(update_id)
+            message = update.get("message")
+            if message is None:
+                # An edited message is not a new command (editing "/khop" would
+                # record the fill again); channel posts and the rest are ignored.
+                logger.info("Telegram: update %s ignored (%s)", update_id,
+                            ",".join(k for k in update if k != "update_id"))
+                continue
+            if isinstance(message, dict) and message.get("text") and message.get("chat"):
+                messages.append(message)
+        if offset is not None:
+            self._save_seen()
+        return offset, messages
+
+    def _dispatch(self, message: dict) -> None:
+        """Queue a command on its chat's lane, bounded so a burst cannot pile up threads.
+
+        Only the allowed ids share the command budget: a stranger flooding a public
+        bot must not make it drop the owner's "/khop" or "/von"."""
+        chat_id = message["chat"].get("id")
+        user_id = (message.get("from") or {}).get("id")
+        if user_id not in self.settings.telegram_allowed_ids:
+            self._dispatch_stranger(message, chat_id)
+            return
+        with self._queued_lock:
+            full = self._queued >= MAX_QUEUED_COMMANDS
+            if not full:
+                self._queued += 1
+        lane = self._lanes[hash(chat_id) % len(self._lanes)]
+        if full:
+            logger.warning("Telegram: %d commands waiting; message from chat %s dropped", self._queued, chat_id)
+            # The owner is told, so a dropped "/khop" is not mistaken for a recorded one.
+            lane.submit(self.send, chat_id, f"⚠️ Bot đang bận ({MAX_QUEUED_COMMANDS} lệnh chờ): chưa thực hiện "
+                                            f"\"{message['text'][:60]}\". Gửi lại sau ít phút.")
+            return
+        try:
+            lane.submit(self._run, message)
+        except Exception:
+            with self._queued_lock:
+                self._queued -= 1
+            raise
+
+    def _dispatch_stranger(self, message: dict, chat_id) -> None:
+        """A message from an id not allowed: at most one reply per chat per window (the
+        /id answer or the refusal), on a small budget of its own; the rest is ignored."""
+        now = time.monotonic()
+        with self._queued_lock:
+            last = self._stranger_replied.get(chat_id)
+            if (last is not None and now - last < STRANGER_REPLY_SECONDS) \
+                    or self._strangers_queued >= MAX_STRANGER_COMMANDS:
+                logger.info("Telegram: message from unauthorised chat %s ignored", chat_id)
+                return
+            if len(self._stranger_replied) > 1000:
+                self._stranger_replied = {k: t for k, t in self._stranger_replied.items()
+                                          if now - t < STRANGER_REPLY_SECONDS}
+            self._stranger_replied[chat_id] = now
+            self._strangers_queued += 1
+        lane = self._lanes[hash(chat_id) % len(self._lanes)]
+        try:
+            lane.submit(self._run, message, stranger=True)
+        except Exception:
+            with self._queued_lock:
+                self._strangers_queued -= 1
+            raise
+
+    def _run(self, message: dict, stranger: bool = False) -> None:
+        try:
+            self._handle(message)
+        except Exception:  # noqa: BLE001 - one bad message must not stop its lane
+            logger.exception("Telegram message handling failed")
+        finally:
+            with self._queued_lock:
+                if stranger:
+                    self._strangers_queued -= 1
+                else:
+                    self._queued -= 1
+
     def _poll(self) -> None:
         offset = None
         while True:
             try:
-                params = {"timeout": 50, "allowed_updates": '["message","edited_message"]'}
+                # Edited messages are not asked for: only new messages run commands.
+                params = {"timeout": 50, "allowed_updates": '["message"]'}
                 if offset is not None:
                     params["offset"] = offset
                 updates = self._call("getUpdates", http_timeout=70, **params)
-                for update in updates or []:
-                    offset = update["update_id"] + 1
-                    message = update.get("message") or update.get("edited_message")
-                    if message and message.get("text"):
-                        threading.Thread(target=self._handle, args=(message,), daemon=True).start()
+                next_offset, messages = self._accept(updates)
+                if next_offset is not None:
+                    # Advanced before any command runs: whatever happens below,
+                    # the next getUpdates confirms this batch and never repeats it.
+                    offset = next_offset
+                for message in messages:
+                    try:
+                        self._dispatch(message)
+                    except Exception:  # noqa: BLE001
+                        logger.exception("Telegram: cannot queue a message")
             except requests.RequestException as exc:
                 logger.warning("Telegram polling error: %s", exc)
                 time.sleep(5)
@@ -205,7 +406,7 @@ class TelegramBot:
             return
         try:
             if command in ("/start", "/help", "/trogiup"):
-                self.send(chat_id, HELP)
+                self.send(chat_id, self._help())
             elif command == "/phantich":
                 self._analyze(chat_id, args)
             elif command == "/nhanh":
@@ -217,12 +418,12 @@ class TelegramBot:
             elif command in ("/danhmuc", "/lenh", "/hieuchinh", "/khop", "/von", "/chay"):
                 self._trading(chat_id, command, args)
             else:
-                self.send(chat_id, HELP)
+                self.send(chat_id, self._help())
         except ValueError as exc:
             self.send(chat_id, f"⚠️ {exc}")
         except Exception as exc:  # noqa: BLE001
             logger.exception("Command %s failed", command)
-            self.send(chat_id, f"⚠️ Lỗi: {exc}")
+            self.send(chat_id, f"⚠️ Lỗi: {redact(exc)}")
 
     def _analyze(self, chat_id: int, args: str) -> None:
         parts = args.split()
@@ -256,19 +457,28 @@ class TelegramBot:
             if self.settings.trade_mode != "signal":
                 raise ValueError("/khop chỉ dùng ở chế độ tín hiệu (TRADE_MODE=signal).")
             parts = args.split()
-            if len(parts) != 4:
-                raise ValueError("Dùng: /khop mua FPT 100 56300 (hoặc /khop ban ...)")
+            if len(parts) not in (4, 5):
+                raise ValueError("Dùng: /khop mua FPT 100 56300 [YYYY-MM-DD] (hoặc /khop ban ...)")
             side = {"mua": "BUY", "buy": "BUY", "ban": "SELL", "bán": "SELL", "sell": "SELL"}.get(parts[0].lower())
             if side is None:
                 raise ValueError("Chiều lệnh là mua hoặc ban.")
-            code, _ = check_request(parts[1])
-            from vnbot.service import today_vn
-
-            self.send(chat_id, self.trader.record_fill(side, code, int(_amount(parts[2])), _amount(parts[3]), today_vn()))
+            # The fill's day (default today) sets when the shares become sellable (T+2).
+            code, day = check_request(parts[1], parts[4] if len(parts) == 5 else None)
+            if datetime.strptime(day, "%Y-%m-%d").weekday() >= 5:
+                raise ValueError(f"{day} là cuối tuần, không có phiên giao dịch.")
+            qty, price = int(_amount(parts[2])), _amount(parts[3])
+            if qty <= 0:
+                raise ValueError("Khối lượng phải lớn hơn 0.")
+            if price < 100:
+                raise ValueError(f"Giá {parts[3]} không hợp lệ. Nhập giá theo đồng, ví dụ 56300 hoặc 56.300.")
+            self.send(chat_id, self.trader.record_fill(side, code, qty, price, day))
 
     def _watch(self, chat_id: int, args: str) -> None:
         if args:
-            codes = self.watchlist.set([c for c in re.split(r"[,\s]+", args) if c])
+            wanted = [c for c in re.split(r"[,\s]+", args) if c]
+            if len(wanted) > 30:
+                raise ValueError("Tối đa 30 mã trong danh sách theo dõi.")
+            codes = self.watchlist.set(wanted)
             self.send(chat_id, f"✅ Theo dõi: {', '.join(codes)}. Báo cáo tự động lúc {self.settings.daily_report_time} các ngày giao dịch.")
         else:
             codes = self.watchlist.get()

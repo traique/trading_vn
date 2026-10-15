@@ -17,6 +17,12 @@ from dataclasses import dataclass
 import pandas as pd
 
 STALE_DAYS = 7
+# Market-wide foreign net (CafeF GTDGRong) includes negotiated deals and gives
+# no matched-only split: one block deal can be 20x a normal session and set the
+# sign of the 20-session sum by itself. A day is capped at this multiple of the
+# median absolute daily net (sign kept, so sell-day counts do not change).
+MARKET_OUTLIER_MULT = 5.0
+_OUTLIER_BASE_DAYS = 60
 
 
 @dataclass(frozen=True)
@@ -29,6 +35,7 @@ class StockFlows:
     room_pct: float | None             # foreign room still open, % of shares
     prop_ratio_10: float | None        # proprietary net / matched value over 10 sessions, %
     last_date: str
+    foreign_net_total_20: float | None = None  # VND incl. negotiated deals - display only
 
 
 @dataclass(frozen=True)
@@ -62,14 +69,28 @@ def _ratio(net: float, base: float) -> float | None:
     return round(net / base * 100, 2) if base and base > 0 else None
 
 
+def _foreign_net_matched(frame: pd.DataFrame) -> pd.Series:
+    """Foreign net on the order book only, falling back row by row to the total.
+
+    ``ForeignNet`` includes negotiated (thỏa thuận) deals while ``MatchValue``
+    does not: one block deal of several thousand billion VND would otherwise
+    flip the 20-session ratio, the streak and the sell-day count. Cached rows
+    written before the vendor exposed ``ForeignNetMatched`` keep the total."""
+    total = frame["ForeignNet"].astype(float)
+    if "ForeignNetMatched" not in frame:
+        return total
+    return frame["ForeignNetMatched"].astype(float).where(lambda v: v.notna(), total)
+
+
 def stock_flows(frame: pd.DataFrame | None, as_of: str) -> StockFlows | None:
     """Foreign and proprietary activity in one stock over its recent sessions."""
     if not _fresh(frame, as_of) or len(frame) < 10:
         return None
+    foreign = _foreign_net_matched(frame).fillna(0.0)
     tail20 = frame.tail(20)
-    net = tail20["ForeignNet"].astype(float).fillna(0.0)
+    net = foreign.tail(20)
     match = tail20["MatchValue"].astype(float).fillna(0.0)
-    signs = [1 if v > 0 else -1 if v < 0 else 0 for v in frame["ForeignNet"].astype(float).fillna(0.0)]
+    signs = [1 if v > 0 else -1 if v < 0 else 0 for v in foreign]
     streak = 0
     for sign in reversed(signs):
         if sign == 0 or (streak and (sign > 0) != (streak > 0)):
@@ -85,11 +106,21 @@ def stock_flows(frame: pd.DataFrame | None, as_of: str) -> StockFlows | None:
         foreign_net_20=float(net.sum()),
         foreign_ratio_20=_ratio(float(net.sum()), float(match.sum())),
         foreign_streak=streak,
-        foreign_sell_days_10=int((tail10["ForeignNet"].astype(float) < 0).sum()),
+        foreign_sell_days_10=int((foreign.tail(10) < 0).sum()),
         room_pct=_finite(frame["ForeignRoomPct"].iloc[-1]) if "ForeignRoomPct" in frame else None,
         prop_ratio_10=prop_ratio,
         last_date=pd.Timestamp(frame["Date"].iloc[-1]).strftime("%Y-%m-%d"),
+        foreign_net_total_20=float(tail20["ForeignNet"].astype(float).fillna(0.0).sum()),
     )
+
+
+def _cap_outliers(series: pd.Series) -> pd.Series:
+    """Clip single-day spikes (block deals) to MARKET_OUTLIER_MULT x the median |value|."""
+    base = series.tail(_OUTLIER_BASE_DAYS).dropna().abs()
+    if len(base) < 10:
+        return series
+    cap = float(base.median()) * MARKET_OUTLIER_MULT
+    return series.clip(lower=-cap, upper=cap) if cap > 0 else series
 
 
 def market_flows(
@@ -103,7 +134,7 @@ def market_flows(
     foreign_net = sell_days = prop_net = etf_net = None
     if _fresh(flows, as_of) and len(flows) >= 15:
         fnet = flows["ForeignNet"].astype(float)
-        foreign_net = float(fnet.tail(20).fillna(0).sum())
+        foreign_net = float(_cap_outliers(fnet).tail(20).fillna(0).sum())
         sell_days = int((fnet.tail(15) < 0).sum())
         if flows["PropNet"].tail(20).notna().sum() >= 10:
             prop_net = float(flows["PropNet"].astype(float).tail(20).fillna(0).sum())

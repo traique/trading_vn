@@ -4,12 +4,15 @@
 
 Reads its settings from the environment or a .env file beside it (see
 deploy/botkeep/.env.example). Serves the web page on SERVER_PORT (Botkeep sets
-it) or PORT, polls Telegram when TELEGRAM_TOKEN is set, and analyses the
-watchlist each weekday at DAILY_REPORT_TIME.
+it) or PORT, polls Telegram when TELEGRAM_TOKEN is set, analyses the
+watchlist each weekday at DAILY_REPORT_TIME and runs the trading bot after the
+close at TRADE_TIME (never before 15:05, when the day's bar is final).
 """
 
 import logging
 import sys
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from vnbot import settings as settings_module
 
@@ -23,11 +26,19 @@ from vnbot.telegram_bot import TelegramBot  # noqa: E402
 from vnbot.trader import TradingBot  # noqa: E402
 from vnbot.web import create_app  # noqa: E402
 
+VN_TZ = ZoneInfo("Asia/Ho_Chi_Minh")
+
+
+def _vn_time(seconds):
+    """Log timestamps in Vietnam time, whatever the host's timezone (often UTC)."""
+    return datetime.fromtimestamp(seconds, VN_TZ).timetuple()
+
 
 def main() -> None:
+    logging.Formatter.converter = staticmethod(_vn_time)
     logging.basicConfig(
         level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        format="%(asctime)s+07 %(levelname)s %(name)s: %(message)s",
         stream=sys.stdout,
     )
     if hasattr(sys.stdout, "reconfigure"):
@@ -55,7 +66,9 @@ def main() -> None:
     jobs.start()
     bot.start()
     DailyScheduler(SETTINGS, jobs, watchlist, bot=trader, notify=bot.broadcast).start()
-    logging.info("Trading bot: mode %s, calibration %s", SETTINGS.trade_mode, "on" if SETTINGS.calibrate else "off")
+    logging.info("Trading bot: mode %s, calibration %s, runs daily at %s (Vietnam time); watchlist report at %s",
+                 SETTINGS.trade_mode, "on" if SETTINGS.calibrate else "off", SETTINGS.trade_time,
+                 SETTINGS.daily_report_time)
 
     app = create_app(SETTINGS, jobs, watchlist, trader=trader)
     uvicorn.run(app, host="0.0.0.0", port=SETTINGS.port, log_level="warning", access_log=False)
