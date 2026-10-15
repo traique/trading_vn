@@ -687,6 +687,7 @@ class Liquidity:
     liquidity_ratio_pct: float  # current vs avg20, 100 = bằng trung bình
     volume_percentile: float  # 0-100, percentile của volume hiện tại trong lịch sử gần đây
     is_thin: bool  # thanh khoản quá thấp - khuyến nghị mua/bán gần như vô nghĩa vì khó vào/ra
+    avg_value_20: float | None = None  # giá trị khớp TB 20 phiên trước (VND), None khi thiếu giá
 
 
 def _percentile_rank(current: float, history: list[float]) -> float:
@@ -717,16 +718,49 @@ def calc_distribution_days(closes: list[float], volumes: list[float], lookback: 
     return count
 
 
+def distribution_events(
+    closes: list[float], volumes: list[float], lookback: int = 25
+) -> tuple[tuple[float, float], ...]:
+    """Candidate distribution days of the last ``lookback`` sessions, raw: every
+    session that closed down on higher volume than the previous one, as
+    (change %, best close since then vs that close %). The policy decides
+    with its own thresholds which of them count (see params.dist_*)."""
+    n = min(len(closes), len(volumes))
+    if n < 2:
+        return ()
+    c, v = closes[-n:], volumes[-n:]
+    out = []
+    for i in range(max(1, len(c) - lookback), len(c)):
+        if c[i - 1] <= 0 or c[i] <= 0:
+            continue
+        change_pct = (c[i] - c[i - 1]) / c[i - 1] * 100
+        if change_pct < 0 and v[i] > v[i - 1]:
+            best_after = max(c[i:])
+            out.append((round(change_pct, 3), round((best_after / c[i] - 1) * 100, 3)))
+    return tuple(out)
+
+
+# Ngưỡng giá trị khớp TB 20 phiên (VND/phiên) dưới mức đó thì gắn cờ is_thin.
+MIN_AVG_VALUE_VND = 3_000_000_000
+
+
 def calc_liquidity(
-    volumes: list[float], min_avg_volume: float = 100_000, percentile_lookback: int = 60
+    volumes: list[float],
+    min_avg_volume: float = 100_000,
+    percentile_lookback: int = 60,
+    closes: list[float] | None = None,
+    min_avg_value: float = MIN_AVG_VALUE_VND,
 ) -> Liquidity | None:
     """So khối lượng khớp phiên gần nhất với trung bình 20 phiên + percentile
     trong `percentile_lookback` phiên gần nhất.
 
     Đây là cảnh báo broker luôn nêu đầu tiên: mã thanh khoản thấp thì
     "mua/bán" gần như vô nghĩa vì không đủ đối ứng để vào/ra ở khối lượng
-    đáng kể. `min_avg_volume` là ngưỡng tuyệt đối (cổ phiếu/phiên) để gắn cờ
-    is_thin - 100k là ước lượng thô cho midcap/penny, có thể chỉnh theo khẩu vị.
+    đáng kể. Khả năng vào/ra phụ thuộc GIÁ TRỊ giao dịch (VND), không phải số
+    cổ phiếu: 130k cp/phiên ở giá 3.300 chỉ ~0,43 tỷ, còn 56k cp ở giá 140.600
+    là ~7,9 tỷ. Có `closes` (cùng chiều dài, khớp từ cuối với `volumes`) thì
+    is_thin = giá trị khớp TB 20 phiên < `min_avg_value`; thiếu giá thì quay
+    về ngưỡng khối lượng `min_avg_volume` (cổ phiếu/phiên).
     """
     if not volumes:
         return None
@@ -742,13 +776,35 @@ def calc_liquidity(
     ratio = (current / avg20) * 100 if avg20 > 0 else 0.0
     history = volumes[-percentile_lookback - 1 : -1] if len(volumes) > 1 else []
     percentile = _percentile_rank(current, history)
+    avg_value = _avg_traded_value(volumes, closes, len(window))
+    is_thin = avg_value < min_avg_value if avg_value is not None else avg20 < min_avg_volume
     return Liquidity(
         avg_volume_20=round(avg20),
         current_volume=round(current),
         liquidity_ratio_pct=round(ratio, 1),
         volume_percentile=percentile,
-        is_thin=avg20 < min_avg_volume,
+        is_thin=is_thin,
+        avg_value_20=round(avg_value) if avg_value is not None else None,
     )
+
+
+def _avg_traded_value(volumes: list[float], closes: list[float] | None, size: int) -> float | None:
+    """Mean of volume x close over the same prior sessions as avg20 (aligned from
+    the end); None when prices are missing or unusable."""
+    if not closes or size <= 0:
+        return None
+    n = min(len(volumes), len(closes))
+    if n < 1:
+        return None
+    vols, prices = volumes[-n:], closes[-n:]
+    # Same window as avg20: the `size` sessions before the last one (or the
+    # only bar when there is a single one).
+    end = n - 1 if n > 1 else n
+    start = max(0, end - size)
+    pairs = list(zip(vols[start:end], prices[start:end], strict=True))
+    if not pairs or any(p is None or p <= 0 for _, p in pairs):
+        return None
+    return sum(v * p for v, p in pairs) / len(pairs)
 
 
 # ─── Signal stats tổng hợp (trend/momentum/volume/volatility) ──────────────

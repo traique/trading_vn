@@ -67,11 +67,15 @@ def _vci_items(symbol: str, start_date: str, end_date: str) -> list[vn_news.Head
     return items
 
 
+NEWS_FEEDS = 4   # VCI disclosures, CafeF research, CafeF ticker news, Google News
+
+
 def collect_company_news(symbol: str, start_date: str, end_date: str, limit: int) -> tuple[list[vn_news.Headline], list[str]]:
     """Merged, de-duplicated company news, newest first, plus the feeds that failed."""
     feeds = {
         "VCI": lambda: _vci_items(symbol, start_date, end_date),
         "CafeF": lambda: vn_news.cafef_research(symbol, start_date, end_date),
+        "CafeF tin": lambda: vn_news.cafef_company_news(symbol, start_date, end_date, limit=limit),
         "Google News": lambda: vn_news.google_news(f'"{symbol}" cổ phiếu', start_date, end_date, limit=limit),
     }
     items: list[vn_news.Headline] = []
@@ -118,7 +122,7 @@ def get_news(ticker: str, start_date: str, end_date: str) -> str:
     symbol = normalize_symbol(ticker)
     limit = int(get_config().get("news_article_limit", 20))
     items, failed = collect_company_news(symbol, start_date, end_date, limit)
-    if not items and len(failed) == 3:
+    if not items and len(failed) == NEWS_FEEDS:
         raise VendorUnavailableError(f"every news feed failed for {symbol}")
     lines = [
         f"## Tin tức {symbol} từ {start_date} đến {end_date}",

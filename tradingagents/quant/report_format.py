@@ -259,8 +259,11 @@ _SELF_INTRO_RE = re.compile(
     re.IGNORECASE,
 )
 _PET_NAME_RE = re.compile(r"\s*,?\s*anh\s+yêu\b", re.IGNORECASE)
+# Chỉ câu NGÔI THỨ NHẤT của chính model ("em đã hoàn thành nhiệm vụ"); câu
+# phân tích kiểu "ban lãnh đạo đặt nhiệm vụ hoàn thành kế hoạch..." giữ nguyên.
 _TASK_DONE_RE = re.compile(
-    r"[^\n]*nhiệm\s+vụ[^\n]*(xong|hoàn thành)[^\n]*\n?",
+    r"[^\n]*(?:(?:em|tôi|mình)\s+(?:đã\s+)?(?:xong|hoàn thành)\s+nhiệm\s+vụ"
+    r"|nhiệm\s+vụ(?:\s+\S+){0,3}?\s+(?:của\s+)?(?:em|tôi|mình)\s+(?:đã\s+)?(?:xong|hoàn thành))[^\n]*\n?",
     re.IGNORECASE,
 )
 
@@ -376,11 +379,29 @@ _ACTION_LABEL_PATTERNS: dict[str, tuple[str, ...]] = {
 }
 # Khuyến nghị bằng chữ thường - chỉ các cụm rõ nghĩa "khuyên làm".
 _ADVICE_PATTERNS: dict[str, tuple[str, ...]] = {
-    "BUY": (r"(?<!\w)nên (?:mua|gom|giải ngân|vào lệnh)(?!\w)", r"(?<!\w)canh mua(?!\w)"),
-    # Không gồm "nên cắt lỗ/chốt lời": kế hoạch BUY/HOLD hợp lệ luôn có câu
-    # "nếu thủng stop thì nên cắt lỗ", "chốt 1/2 tại T1".
-    "SELL": (r"(?<!\w)nên (?:bán|thoát hàng|thoát vị thế)(?!\w)",),
+    "BUY": (
+        r"(?<!\w)nên (?:mua|gom|giải ngân|vào lệnh)(?!\w)", r"(?<!\w)canh mua(?!\w)",
+        r"(?<!\w)khuyến nghị\s*:?\s*(?:mua|buy|tích luỹ|tích lũy)(?!\w)",
+        r"(?<!\w)mua vào(?!\w)", r"(?<!\w)giải ngân(?!\w)", r"(?<!\w)tăng tỷ trọng(?!\w)",
+        r"(?<!\w)có thể mua(?!\w)", r"(?<!\w)overweight(?!\w)", r"(?<!\w)strong buy(?!\w)",
+    ),
+    # Không gồm "nên cắt lỗ/chốt lời" đơn thuần: kế hoạch BUY/HOLD hợp lệ luôn có
+    # câu "nếu thủng stop thì nên cắt lỗ", "chốt 1/2 tại T1".
+    "SELL": (
+        r"(?<!\w)nên (?:bán|thoát hàng|thoát vị thế)(?!\w)",
+        r"(?<!\w)khuyến nghị\s*:?\s*(?:bán|sell)(?!\w)",
+        r"(?<!\w)bán ra(?!\w)", r"(?<!\w)chốt lời toàn bộ(?!\w)", r"(?<!\w)cắt lỗ ngay(?!\w)",
+        r"(?<!\w)giảm tỷ trọng(?!\w)", r"(?<!\w)underweight(?!\w)", r"(?<!\w)strong sell(?!\w)",
+    ),
 }
+# Hành động của NGƯỜI KHÁC (khối ngoại mua vào, lực BÁN, bên MUA, tự doanh bán ra...)
+# là mô tả thị trường, không phải khuyến nghị.
+_THIRD_PARTY_BEFORE = re.compile(
+    r"(?:khối ngoại|nước ngoài|tự doanh|quỹ|tổ chức|cá mập|lực|bên|phe|áp lực|"
+    r"tín hiệu|điểm|lệnh|chiều|mới được|được phép)\s*$",
+    re.IGNORECASE,
+)
+_THIRD_PARTY_AFTER = re.compile(r"^\s*(?:ròng|chủ động|mạnh tay)", re.IGNORECASE)
 _NEGATION_WORDS = ("không", "chưa", "đừng", "tránh", "chẳng", "not ", "no ", "chớ")
 # Câu điều kiện ("nếu thủng 48.500 thì nên bán") là kịch bản, không phải đổi
 # action - chỉ bỏ qua khi kiểm action của bản ĐẦY ĐỦ; bản tham khảo cho thành
@@ -394,12 +415,23 @@ _PLAN_LANGUAGE_RE = re.compile(
     r"nên mua|nên bán|nên giữ|nên gom|nên cắt|nên chốt)(?!\w)",
     re.IGNORECASE,
 )
-_PRICE_NUMBER_RE = re.compile(r"(?<![\d.,])(\d{1,3}(?:\.\d{3})+|\d{5,7})(?:,\d+)?(?![\d.])")
+# Lookahead "(?!\d|\.\d)": "56.300." ở cuối câu vẫn là một con số.
+_PRICE_NUMBER_RE = re.compile(r"(?<![\d.,])(\d{1,3}(?:\.\d{3})+|\d{5,7})(?:,\d+)?(?!\d|\.\d)")
 
 
 def _negated(text: str, start: int) -> bool:
+    """Phủ định đứng SÁT cụm (2 từ liền trước): "không nên MUA", "tránh mua" -
+    nhưng "rủi ro không lớn, MUA ngay" không phải phủ định của MUA."""
     window = text[max(0, start - _NEGATION_WINDOW) : start].lower()
-    return any(word in window for word in _NEGATION_WORDS)
+    window = re.split(r"[,;:.!?\n]", window)[-1]
+    words = window.split()[-2:]
+    tail = " " + " ".join(words) + " "
+    return any((" " + word.strip() + " ") in tail for word in _NEGATION_WORDS)
+
+
+def _third_party(text: str, match: re.Match) -> bool:
+    before = text[max(0, match.start() - 24) : match.start()]
+    return bool(_THIRD_PARTY_BEFORE.search(before) or _THIRD_PARTY_AFTER.match(text, match.end()))
 
 
 def _conditional(text: str, start: int) -> bool:
@@ -422,14 +454,16 @@ def find_action_conflicts(text: str, allowed_actions: set[str] | frozenset[str])
             continue
         for pattern in patterns:
             for match in re.finditer(pattern, text):
-                if not _negated(text, match.start()):
+                if (not _negated(text, match.start()) and not _conditional(text, match.start())
+                        and not _third_party(text, match)):
                     conflicts.append(f"{action}:{match.group(0)}")
     for action, patterns in _ADVICE_PATTERNS.items():
         if action in allowed_actions:
             continue
         for pattern in patterns:
             for match in re.finditer(pattern, text, re.IGNORECASE):
-                if not _negated(text, match.start()) and not _conditional(text, match.start()):
+                if (not _negated(text, match.start()) and not _conditional(text, match.start())
+                        and not _third_party(text, match)):
                     conflicts.append(f"{action}:{match.group(0)}")
     return conflicts
 
@@ -447,10 +481,49 @@ def _normalize_price_token(token: str) -> int | None:
     return int(digits) if digits.isdigit() else None
 
 
+# Điểm chỉ số (VNINDEX 1.719,42 điểm) không phải giá cổ phiếu: không đưa vào
+# tập "giá" để Output Guard không báo nhầm mốc VNINDEX là giá ngoài dữ liệu.
+_INDEX_NAME_RE = re.compile(
+    r"(?:VN-?INDEX|VNI\b|VN30(?:-?INDEX)?|HNX-?INDEX|HNX30|UPCOM-?INDEX|chỉ số (?:chung|thị trường))",
+    re.IGNORECASE,
+)
+_INDEX_UNIT_RE = re.compile(r"\s*(?:điểm|đ\s*iểm|points?|pts)\b", re.IGNORECASE)
+_INDEX_LOOKBACK = 24
+
+
+# Số không phải giá cổ phiếu: khối lượng, giá trị (tỷ/triệu), EPS, cổ tức, NAV...
+_NON_PRICE_UNIT_RE = re.compile(
+    r"\s*(?:tỷ|triệu|nghìn tỷ|cp\b|cổ phiếu|cổ phần|usd|đơn vị|lượt|người|%)", re.IGNORECASE)
+_NON_PRICE_BEFORE_RE = re.compile(
+    r"(?:eps|kl|khối lượng|vốn hoá|vốn hóa|lợi nhuận|doanh thu|nav|cổ tức|room|sở hữu|nắm)"
+    r"[^\d\n]{0,12}$", re.IGNORECASE)
+
+
+def _is_index_points(text: str, match: re.Match) -> bool:
+    if _NON_PRICE_UNIT_RE.match(text, match.end()):
+        return True
+    if _NON_PRICE_BEFORE_RE.search(text[max(0, match.start() - 24) : match.start()]):
+        return True
+    if _INDEX_UNIT_RE.match(text, match.end()):
+        return True
+    window = text[max(0, match.start() - _INDEX_LOOKBACK) : match.start()].rsplit("\n", 1)[-1]
+    names = list(_INDEX_NAME_RE.finditer(window))
+    if not names:
+        return False
+    # Chỉ khi giữa tên chỉ số và con số không có số nào khác ("VNINDEX 1.720",
+    # "VN-Index quanh 1.700"), để "VNINDEX giảm 2%, FPT 56.300" vẫn là giá.
+    return not re.search(r"\d", window[names[-1].end():])
+
+
 def price_numbers(text: str) -> set[int]:
-    """Mọi số dạng giá/khối lượng (>= 1.000 viết kiểu VN, hoặc 5-7 chữ số liền)."""
+    """Mọi số dạng giá/khối lượng (>= 1.000 viết kiểu VN, hoặc 5-7 chữ số liền).
+
+    Bỏ qua điểm chỉ số (có đơn vị "điểm" hoặc đứng ngay sau tên chỉ số)."""
     out: set[int] = set()
-    for match in _PRICE_NUMBER_RE.finditer(text or ""):
+    text = text or ""
+    for match in _PRICE_NUMBER_RE.finditer(text):
+        if _is_index_points(text, match):
+            continue
         value = _normalize_price_token(match.group(1))
         if value is not None and value >= 1000:
             out.add(value)

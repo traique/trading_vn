@@ -104,6 +104,23 @@ def _lists(frame: pd.DataFrame) -> tuple[list[float], list[float], list[float], 
     )
 
 
+def _align_to_benchmark(
+    closes: list[float], dates: list[str], vni_closes: list[float], vni_dates: list[str]
+) -> tuple[list[float], list[float]]:
+    """The stock's closes paired by DATE with the VNINDEX close of the same session.
+
+    Pairing the two tails by array position compares different sessions when
+    the stock was suspended, listed later, or one source misses a day; each
+    stock bar takes the last VNINDEX close on or before its date instead, and
+    bars older than the VNINDEX series are dropped.
+    """
+    if not closes or not vni_closes:
+        return closes, []
+    ends = feat.benchmark_end_indices(dates, vni_dates, len(closes), len(vni_closes))
+    pairs = [(c, vni_closes[e - 1]) for c, e in zip(closes, ends, strict=True) if e > 0]
+    return [p[0] for p in pairs], [p[1] for p in pairs]
+
+
 def _news_impact(symbol: str, as_of_date: str) -> tuple[float, list]:
     from tradingagents.dataflows.news import collect_company_news, sentiment_score
 
@@ -135,38 +152,82 @@ def _live_quote_line(symbol: str, as_of_date: str, price: float) -> str | None:
     )
 
 
-def _estimated_nav(portfolio, price: float) -> float | None:
+def _estimated_nav(portfolio, price: float, symbol: str | None = None) -> float | None:
+    """Cash plus holdings: the analysed symbol at its current close ``price``,
+    other positions at cost (the only price the portfolio carries for them)."""
     if portfolio is None or getattr(portfolio, "cash", None) is None:
         return None
     nav = float(portfolio.cash)
+    held = portfolio.position_in(symbol) if symbol and hasattr(portfolio, "position_in") else None
     for position in portfolio.positions:
-        if position.average_price:
+        if held is not None and position is held and price > 0:
+            nav += float(position.quantity) * float(price)
+        elif position.average_price:
             nav += float(position.quantity) * float(position.average_price)
     return nav if nav > 0 else None
 
 
-def analyze(symbol: str, as_of_date: str, *, portfolio=None) -> QuantResult:
-    """Run the full deterministic pipeline for ``symbol`` at ``as_of_date``.
+def _suggested_shares(portfolio, nav: float | None, position_pct: float, entry_high: float) -> int | None:
+    """Board-lot shares for the plan's % NAV, capped by the free cash: a VN cash
+    account cannot buy more than its cash at the top of the entry zone."""
+    if not nav:
+        return None
+    shares = vn_rules.shares_for(nav, position_pct, entry_high)
+    cash = getattr(portfolio, "cash", None)
+    if cash is not None and entry_high > 0:
+        shares = min(shares, vn_rules.round_lot(max(float(cash), 0.0) / entry_high))
+    return shares
 
-    Raises NoMarketDataError when the stock itself has no usable prices; every
-    other input (VNINDEX, news, sector, exchange) degrades gracefully.
+
+@dataclass
+class Prepared:
+    """Everything the policy needs for one stock at one date, and what the report shows beside it."""
+
+    inputs: policy.PolicyInputs
+    closes: list[float]
+    dates: list[str]
+    stats: feat.SignalStats
+    enhanced: feat.EnhancedIndicators | None
+    ma_alignment: feat.MAAlignment | None
+    support_resistance: feat.SupportResistance | None
+    key_levels: feat.KeyLevels
+    liquidity: feat.Liquidity | None
+    relative_strength: float
+    vni_closes: list[float]
+    adjustment_note: str | None
+
+
+def build_inputs(
+    code: str,
+    as_of_date: str,
+    frame: pd.DataFrame,
+    vni: pd.DataFrame | None,
+    *,
+    exchange: str | None,
+    source: str = "",
+    news_impact: float = 0.0,
+    is_holding: bool = False,
+    stock_flows=None,
+    market_flows=None,
+    etf_member: bool = False,
+    params=None,
+) -> Prepared:
+    """The policy inputs from bars already cut at ``as_of_date`` - no network.
+
+    Shared by the live analysis and the backtest/calibration, so both decide
+    on exactly the same features.
     """
-    code = normalize_symbol(symbol)
-    if vn_rules.is_index(code):
-        raise NoMarketDataError(symbol, code, "an index has no trading decision; analyse a stock")
-    frame = _series(code, as_of_date)
-    closes, highs, lows, volumes, dates = _lists(frame)
-    try:
-        vni = _series(vn_rules.BENCHMARK, as_of_date)
-        vni_closes, vni_highs, vni_lows, vni_volumes, _ = _lists(vni)
-    except VendorError as exc:
-        logger.warning("VNINDEX unavailable for %s: %s", as_of_date, exc)
-        vni_closes = vni_highs = vni_lows = vni_volumes = []
-    exchange = exchange_of(code)
-    held = portfolio.position_in(code) if portfolio is not None else None
-    is_holding = bool(held and held.quantity > 0)
+    from tradingagents.quant.params import active as active_params
 
-    audit = price_adjust.audit_series(code, frame.attrs.get("source", ""), closes, dates)
+    frame = frame.tail(HISTORY_BARS).reset_index(drop=True)
+    closes, highs, lows, volumes, dates = _lists(frame)
+    if vni is not None and not vni.empty:
+        vni = vni.tail(HISTORY_BARS).reset_index(drop=True)
+        vni_closes, vni_highs, vni_lows, vni_volumes, vni_dates = _lists(vni)
+    else:
+        vni_closes = vni_highs = vni_lows = vni_volumes = vni_dates = []
+
+    audit = price_adjust.audit_series(code, source, closes, dates, exchange=exchange)
     window_gap = price_adjust.last_gap_in_window(audit.gaps, len(closes))
     as_of_dt = datetime.strptime(as_of_date, "%Y-%m-%d").replace(hour=15, tzinfo=vn_rules.VN_TZ)
     quality = validation.validate_ohlcv(closes, highs, lows, volumes, dates, now=as_of_dt)
@@ -179,9 +240,9 @@ def analyze(symbol: str, as_of_date: str, *, portfolio=None) -> QuantResult:
         quality = replace(quality, status="degraded", reasons=[*quality.reasons, gap_reason])
 
     price = closes[-1]
-    news_impact, news = _news_impact(code, as_of_date)
     stats = feat.calc_signal_stats(closes, volumes, price)
-    relative_strength = feat.calc_relative_strength(closes, vni_closes, lookback=65) if vni_closes else 0.0
+    rs_closes, rs_vni = _align_to_benchmark(closes, dates, vni_closes, vni_dates)
+    relative_strength = feat.calc_relative_strength(rs_closes, rs_vni, lookback=65) if rs_vni else 0.0
     enhanced = feat.build_enhanced_indicators(closes, price, highs, lows) if quality.usable and len(closes) >= 20 else None
 
     level_start = window_gap.index if window_gap is not None else 0
@@ -199,22 +260,89 @@ def analyze(symbol: str, as_of_date: str, *, portfolio=None) -> QuantResult:
     vni_multi_tf = feat.calc_multi_timeframe(vni_closes) if vni_closes else None
     vni_adx = feat.calc_adx(vni_closes, vni_highs, vni_lows) if vni_closes else None
     vni_distribution = feat.calc_distribution_days(vni_closes, vni_volumes) if vni_closes else 0
+    vni_dist_events = feat.distribution_events(vni_closes, vni_volumes) if vni_closes else None
 
-    decision = policy.evaluate_policy(policy.PolicyInputs(
+    inputs = policy.PolicyInputs(
         price=price, stats=stats, enhanced=enhanced, ma_alignment=ma_alignment,
         support_resistance=support_resistance, liquidity=liquidity, session=session,
         relative_strength=relative_strength, trend_score=trend_score, news_impact=news_impact,
         quality=quality, vnindex_multi_tf=vni_multi_tf, vnindex_adx=vni_adx,
         vnindex_distribution_days=vni_distribution, key_levels=key_levels, exchange=exchange,
         is_holding=is_holding, unadjusted_gap=window_gap is not None,
-    ))
+        stock_flows=stock_flows, market_flows=market_flows, etf_member=etf_member,
+        vnindex_dist_events=vni_dist_events,
+        params=params or active_params(),
+    )
+    return Prepared(
+        inputs=inputs, closes=closes, dates=dates, stats=stats, enhanced=enhanced,
+        ma_alignment=ma_alignment, support_resistance=support_resistance, key_levels=key_levels,
+        liquidity=liquidity, relative_strength=relative_strength, vni_closes=vni_closes,
+        adjustment_note=audit.note,
+    )
+
+
+def load_flow_signals(code: str, as_of_date: str, vni_closes: list[float]):
+    """(stock flows, market flows, VN30 member) as of the date; Nones when unavailable."""
+    from tradingagents.dataflows import money_flows as mf
+    from tradingagents.quant import flow_features as ff
+
+    stock = market = None
+    member = False
+    try:
+        stock = ff.stock_flows(mf.load_stock_flows(code, as_of_date), as_of_date)
+    except Exception as exc:  # noqa: BLE001 - flows only adjust; the decision stands without them
+        logger.warning("Stock flows unavailable for %s: %s", code, exc)
+    try:
+        market = ff.market_flows(
+            mf.load_market_flows(as_of_date), mf.load_etf_flows(as_of_date),
+            mf.load_breadth(as_of_date), vni_closes, as_of_date,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Market flows unavailable for %s: %s", as_of_date, exc)
+    try:
+        member = code in mf.index_members("VN30")
+    except Exception:  # noqa: BLE001
+        member = False
+    return stock, market, member
+
+
+def analyze(symbol: str, as_of_date: str, *, portfolio=None, params=None, flows: bool = True) -> QuantResult:
+    """Run the full deterministic pipeline for ``symbol`` at ``as_of_date``.
+
+    Raises NoMarketDataError when the stock itself has no usable prices; every
+    other input (VNINDEX, money flows, news, sector, exchange) degrades gracefully.
+    """
+    code = normalize_symbol(symbol)
+    if vn_rules.is_index(code):
+        raise NoMarketDataError(symbol, code, "an index has no trading decision; analyse a stock")
+    frame = _series(code, as_of_date)
+    try:
+        vni = _series(vn_rules.BENCHMARK, as_of_date)
+    except VendorError as exc:
+        logger.warning("VNINDEX unavailable for %s: %s", as_of_date, exc)
+        vni = None
+    exchange = exchange_of(code)
+    held = portfolio.position_in(code) if portfolio is not None else None
+    is_holding = bool(held and held.quantity > 0)
+    news_impact, news = _news_impact(code, as_of_date)
+    vni_list = [float(c) for c in vni["Close"]] if vni is not None else []
+    stock_flows, market_flows, member = load_flow_signals(code, as_of_date, vni_list) if flows else (None, None, False)
+
+    prep = build_inputs(
+        code, as_of_date, frame, vni, exchange=exchange, source=frame.attrs.get("source", ""),
+        news_impact=news_impact, is_holding=is_holding, stock_flows=stock_flows,
+        market_flows=market_flows, etf_member=member, params=params,
+    )
+    decision = policy.evaluate_policy(prep.inputs)
+    price, dates, stats, enhanced = prep.closes[-1], prep.dates, prep.stats, prep.enhanced
+    ma_alignment, support_resistance, key_levels = prep.ma_alignment, prep.support_resistance, prep.key_levels
+    liquidity, relative_strength, vni_closes = prep.liquidity, prep.relative_strength, prep.vni_closes
 
     ceiling, floor = vn_rules.ceiling_floor(price, exchange) if exchange else (None, None)
     plan = decision.trade_plan
     shares = None
-    nav = _estimated_nav(portfolio, price)
-    if plan is not None and nav:
-        shares = vn_rules.shares_for(nav, plan.position_size_pct, plan.entry_high)
+    if plan is not None:
+        shares = _suggested_shares(portfolio, _estimated_nav(portfolio, price, code), plan.position_size_pct, plan.entry_high)
     sector_perf = sector.sector_performance(code, as_of_date, vni_closes)
 
     result = QuantResult(
@@ -235,13 +363,55 @@ def analyze(symbol: str, as_of_date: str, *, portfolio=None) -> QuantResult:
         result, decision=decision, stats=stats, enhanced=enhanced, ma_alignment=ma_alignment,
         support_resistance=support_resistance, key_levels=key_levels, liquidity=liquidity,
         relative_strength=relative_strength, sector_perf=sector_perf, news=news,
-        adjustment_note=audit.note, held=held,
+        adjustment_note=prep.adjustment_note, held=held,
         live_quote_line=_live_quote_line(code, as_of_date, price),
+        stock_flows=stock_flows, market_flows=market_flows,
     )
     return result
 
 
 # ─── Rendering ───────────────────────────────────────────────────────────────
+
+
+def flow_lines(stock_flows, market_flows) -> list[str]:
+    """Money-flow facts for the report, each number as the system measured it."""
+    from tradingagents.quant.flow_features import fmt_bn
+
+    lines = []
+    f = stock_flows
+    if f is not None:
+        streak = (f"mua ròng {f.foreign_streak} phiên liên tiếp" if f.foreign_streak > 0
+                  else f"bán ròng {-f.foreign_streak} phiên liên tiếp" if f.foreign_streak < 0 else "không có chuỗi")
+        ratio = f" ({f.foreign_ratio_20:+.1f}% giá trị khớp)" if f.foreign_ratio_20 is not None else ""
+        lines.append(f"Khối ngoại 20 phiên: {fmt_bn(f.foreign_net_20)}{ratio}; {streak}; "
+                     f"bán ròng {f.foreign_sell_days_10}/10 phiên gần nhất"
+                     + (f"; room còn {f.room_pct:.2f}%" if f.room_pct is not None else ""))
+        if f.prop_ratio_10 is not None:
+            lines.append(f"Tự doanh 10 phiên: {f.prop_ratio_10:+.1f}% giá trị khớp")
+    else:
+        lines.append("Khối ngoại/tự doanh của mã: chưa có dữ liệu.")
+    m = market_flows
+    if m is not None:
+        parts = []
+        if m.foreign_net_20 is not None:
+            parts.append(f"khối ngoại toàn thị trường 20 phiên {fmt_bn(m.foreign_net_20)} "
+                         f"(bán ròng {m.foreign_sell_days_15}/15 phiên)")
+        if m.prop_net_20 is not None:
+            parts.append(f"tự doanh 20 phiên {fmt_bn(m.prop_net_20)}")
+        if m.etf_net_20 is not None:
+            parts.append(f"ETF nội 20 phiên {fmt_bn(m.etf_net_20)}")
+        if m.adv_ratio_10 is not None:
+            parts.append(f"tỷ lệ mã tăng 10 phiên HOSE {m.adv_ratio_10:.0f}%")
+        if m.pct_above_ma50 is not None:
+            parts.append(f"{m.pct_above_ma50:.0f}% mã trên MA50")
+        if m.breadth_divergence:
+            parts.append("PHÂN KỲ: VNINDEX đỉnh 20 phiên nhưng độ rộng yếu")
+        lines.append("Thị trường: " + "; ".join(parts))
+    else:
+        lines.append("Dòng tiền toàn thị trường: chưa có dữ liệu.")
+    return lines
+
+
 
 
 def _p(value: float | None) -> str:
@@ -308,6 +478,7 @@ def render_summary_from_state(decision: dict) -> str:
 def render_report(
     r: QuantResult, *, decision, stats, enhanced, ma_alignment, support_resistance, key_levels,
     liquidity, relative_strength, sector_perf, news, adjustment_note, held, live_quote_line,
+    stock_flows=None, market_flows=None,
 ) -> str:
     """Everything the agents may cite, with every price level and its % distance pre-computed."""
     price = r.price
@@ -426,6 +597,9 @@ def render_report(
         )
         if liquidity.is_thin:
             lines.append("⚠️ CẢNH BÁO THANH KHOẢN: khối lượng trung bình quá thấp - khó vào/ra khối lượng lớn.")
+
+    lines += ["", "--- Dòng tiền ---"]
+    lines.extend(flow_lines(stock_flows, market_flows))
 
     lines += ["", "--- Ngành & tin tức ---"]
     if sector_perf is not None:

@@ -224,6 +224,19 @@ def test_todays_forming_bar_is_dropped_during_the_session():
 
 
 @pytest.mark.unit
+def test_todays_bar_is_not_final_between_the_put_through_end_and_15_05():
+    # Regression: 15:00-15:04 served a forming (e.g. 14:50) snapshot as the close,
+    # while the cache rules only treat a bar as final from 15:05.
+    frame = pd.DataFrame({"Date": pd.to_datetime(["2026-10-12", "2026-10-13"]), "Close": [1.0, 2.0]})
+    as_of = pd.Timestamp("2026-10-13")
+    at_1502 = datetime(2026, 10, 13, 15, 2, tzinfo=vn_rules.VN_TZ)
+    at_1505 = datetime(2026, 10, 13, 15, 5, tzinfo=vn_rules.VN_TZ)
+    assert len(ohlcv.drop_forming_bar(frame, as_of, now=at_1502)) == 1
+    assert len(ohlcv.drop_forming_bar(frame, as_of, now=at_1505)) == 2
+    assert len(ohlcv.drop_forming_bar(frame, pd.Timestamp("2026-10-12"), now=at_1502)) == 2   # a past day
+
+
+@pytest.mark.unit
 def test_stock_data_text_states_vnd_and_the_source(loader):
     loader["dnse"] = _frame(["2026-10-12", "2026-10-13"], close=56300.0)
     text = ohlcv.get_stock_data("fpt.vn", "2026-10-12", "2026-10-13", source="dnse")

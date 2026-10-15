@@ -7,6 +7,8 @@ vci_direct/personas/portfolio/channel service không được port vì các modu
 đó không có trong tradingagents.quant.
 """
 
+import pytest
+
 from tests.test_quant_policy import _closes_uptrend, _make_inputs
 from tradingagents.quant import features as feat, policy as pol, price_adjust, report_format as rf
 from tradingagents.quant.validation import DataQuality
@@ -65,7 +67,10 @@ def test_khong_co_khang_cu_that_thi_target_uoc_luong_khong_mo_buy(monkeypatch):
 def test_khang_cu_gan_hon_1r_duoc_ton_trong(monkeypatch):
     inputs = _forced_buy_inputs(monkeypatch, 1.02)
     decision = pol.evaluate_policy(inputs)
-    assert decision.target_price == feat.round_order_price(round(inputs.price * 1.02))
+    # T1 is the highest valid price AT OR BELOW the resistance (it used to
+    # round to the nearest tick, which could land one tick above the level).
+    assert decision.target_price == pol._target_at_or_below(round(inputs.price * 1.02))
+    assert decision.target_price <= round(inputs.price * 1.02)
     assert decision.action == "WATCH"
     assert decision.rr_ratio < pol.MIN_RR_RATIO
 
@@ -175,3 +180,78 @@ def test_cau_dieu_kien_trong_ke_hoach_khong_bi_coi_la_doi_action():
     # Bản tham khảo: câu điều kiện có khuyến nghị vẫn bị cấm.
     assert rf.find_plan_language("Nếu giá về 25.000 thì nên mua")
     assert rf.find_plan_language("Tỷ trọng doanh thu mảng phần mềm tăng") == []
+
+
+def test_find_unknown_prices_bo_qua_diem_vnindex():
+    prompt = "Giá đóng cửa 56.300, hỗ trợ 55.000"
+    text = (
+        "VNINDEX 1.719,42 điểm, VN-Index quanh 1.700, mốc 1.750 điểm. "
+        "VNINDEX giảm 2%, FPT 58.000"
+    )
+    assert rf.find_unknown_prices(text, prompt) == [58000]
+    # Giá cổ phiếu sàn HNX vẫn là giá, không phải điểm chỉ số.
+    assert rf.find_unknown_prices("Mã sàn HNX giá 27.500", prompt) == [27500]
+
+
+def test_relative_strength_can_vnindex_theo_ngay():
+    from tradingagents.quant import engine
+
+    dates = ["2026-01-02", "2026-01-05", "2026-01-07"]          # FPT nghỉ 06/01
+    vni_dates = ["2026-01-02", "2026-01-05", "2026-01-06", "2026-01-07"]
+    closes, vni = engine._align_to_benchmark([10.0, 11.0, 12.0], dates, [100.0, 101.0, 150.0, 102.0], vni_dates)
+    assert closes == [10.0, 11.0, 12.0]
+    assert vni == [100.0, 101.0, 102.0]
+    # Bar cũ hơn chuỗi VNINDEX bị bỏ, không ghép với VNINDEX tương lai.
+    closes, vni = engine._align_to_benchmark([9.0, 10.0], ["2025-12-31", "2026-01-02"], [100.0], ["2026-01-02"])
+    assert (closes, vni) == ([10.0], [100.0])
+
+
+# ─── Output Guard: the review's cases ────────────────────────────────────────
+
+_BUY = frozenset({"BUY"})
+_NO_TRADE = frozenset({"NO_TRADE", "WATCH"})
+
+
+@pytest.mark.parametrize("text", [
+    "Nếu thủng stop 50.800 thì BÁN cắt lỗ",
+    "Hàng mua về T+2 mới được BÁN",
+    "Bên BÁN đang yếu dần",
+    "Khối ngoại bán ra 300 tỷ trong tuần",
+])
+def test_scenarios_rules_and_market_sides_are_not_contradictions(text):
+    assert rf.find_action_conflicts(text, _BUY) == []
+
+
+@pytest.mark.parametrize("text", [
+    "Áp lực BÁN lớn", "Tín hiệu MUA chưa xác nhận", "Khối ngoại mua vào 200 tỷ", "không nên mua đuổi",
+])
+def test_market_descriptions_do_not_contradict_no_trade(text):
+    assert rf.find_action_conflicts(text, _NO_TRADE) == []
+
+
+@pytest.mark.parametrize("text", [
+    "Mua vào quanh 56.000", "Khuyến nghị: Mua", "Giải ngân 30% NAV", "tăng tỷ trọng", "Overweight",
+    "Rủi ro không lớn, MUA ngay",
+])
+def test_plain_calls_against_no_trade_are_caught(text):
+    assert rf.find_action_conflicts(text, _NO_TRADE)
+
+
+def test_prices_at_the_end_of_a_sentence_and_non_price_numbers():
+    assert rf.price_numbers("Mua quanh 55.500.") == {55500}
+    assert rf.price_numbers("KL 2.345.600 cp, EPS 5.000đ, vốn hóa 12.345 tỷ, NAV 1.000.000.000") == set()
+
+
+def test_only_the_models_own_task_done_line_is_removed():
+    kept = "Ban lãnh đạo đặt nhiệm vụ hoàn thành kế hoạch lợi nhuận 9.000 tỷ."
+    assert kept in rf.clean_analysis_output(kept + "\n\nEm đã hoàn thành nhiệm vụ.")
+    assert "Em đã hoàn thành" not in rf.clean_analysis_output(kept + "\n\nEm đã hoàn thành nhiệm vụ.")
+
+
+def test_watch_and_sell_carry_no_stop_or_target_lines():
+    from tradingagents.agents.schemas import plan_lines
+
+    watch = plan_lines({"action": "WATCH", "stop_price": 31_100, "target_price": 32_950, "rr_ratio": 0.23})
+    assert "**Stop Loss**: not provided" in watch and "**Risk/Reward**: not provided" in watch
+    sell = plan_lines({"action": "SELL", "stop_price": 60_000, "target_price": 52_000})
+    assert "**Stop Loss**: not provided" in sell and any(line.startswith("**Invalidation Level**") for line in sell)

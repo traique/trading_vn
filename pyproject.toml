@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "tradingagents"
 dynamic = ["version"]
-description = "TradingAgents: Multi-Agents LLM Financial Trading Framework for the Vietnamese stock market"
+description = "TradingAgents VN: a quant engine, multi-agent LLM analysis and a self-calibrating trading bot for Vietnamese stocks"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -31,6 +31,17 @@ dev = [
     "ruff>=0.16",
     "pytest>=8.0",
     "pytest-subtests>=0.13",
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+    "python-multipart>=0.0.9",
+]
+# The always-on app (web page, Telegram bot, trading bot): pip install ".[bot]",
+# then python main_botkeep.py.
+bot = [
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+    "python-multipart>=0.0.9",
+    "tzdata>=2024.1",
 ]
 # Amazon Bedrock support (AWS SigV4 auth + boto3). Optional so the core install
 # stays lean: pip install "tradingagents[bedrock]".
@@ -45,7 +56,7 @@ tradingagents = "cli.main:app"
 version = {attr = "tradingagents.__version__"}
 
 [tool.setuptools.packages.find]
-include = ["tradingagents*", "cli*"]
+include = ["tradingagents*", "cli*", "vnbot*"]
 
 [tool.setuptools.package-data]
 cli = ["static/*"]

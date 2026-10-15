@@ -1,4 +1,21 @@
 services:
+  # The always-on app: web page on :8080, Telegram bot, trading bot.
+  #   cp deploy/botkeep/.env.example .env  (fill it in), then: docker compose up -d bot
+  bot:
+    build: .
+    entrypoint: ["python", "main_botkeep.py"]
+    env_file:
+      - .env
+    environment:
+      - DATA_DIR=/home/appuser/.tradingagents/bot
+    ports:
+      - "8080:8080"
+    volumes:
+      - ${TRADINGAGENTS_DATA_DIR:-tradingagents_data}:/home/appuser/.tradingagents
+    restart: unless-stopped
+    profiles:
+      - bot
+
   tradingagents:
     build: .
     env_file:

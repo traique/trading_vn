@@ -46,6 +46,7 @@ def market(monkeypatch):
     monkeypatch.setattr(engine, "_news_impact", lambda s, d: (0.0, []))
     monkeypatch.setattr(engine.sector, "sector_performance", lambda *a, **k: None)
     monkeypatch.setattr(engine, "_live_quote_line", lambda *a: None)
+    monkeypatch.setattr(engine, "load_flow_signals", lambda *a: (None, None, False))
     return frames
 
 

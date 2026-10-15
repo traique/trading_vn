@@ -51,11 +51,14 @@ def get_market_context(ticker: str, as_of_date: str) -> str:
             lows = [float(v) for v in frame["Low"]]
             adx = feat.calc_adx(closes, highs, lows)
             distribution = feat.calc_distribution_days(closes, volumes)
-            regime = policy.classify_market_regime(tf, adx, distribution)
+            from tradingagents.quant.params import active as active_params
+
+            threshold = active_params().distribution_day_threshold
+            regime = policy.classify_market_regime(tf, adx, distribution, threshold)
             liquidity = feat.calc_liquidity(volumes)
             vni_regime_line = (
                 f"Chế độ thị trường VNINDEX: {_REGIME_VI.get(regime, regime)}; {distribution} ngày phân phối "
-                f"trong 25 phiên (≥{policy.DISTRIBUTION_DAY_THRESHOLD} là risk-off); "
+                f"trong 25 phiên (≥{threshold} là risk-off); "
                 + rfmt.adx_direction_line(adx.adx, adx.di_plus, adx.di_minus, adx.trending, available=adx.available)
                 + f"; thanh khoản phiên gần nhất {rfmt.fmt_number(liquidity.liquidity_ratio_pct, 1)}% TB20"
             )

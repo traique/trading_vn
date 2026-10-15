@@ -44,6 +44,9 @@ _HEADERS = {
     "Origin": "https://trading.vietcap.com.vn",
 }
 STATEMENT_SECTIONS = ("INCOME_STATEMENT", "BALANCE_SHEET", "CASH_FLOW")
+# VCI's own codes for the indices it names differently from DNSE (checked live
+# 15/10/2026: gap-chart has no bars for "HNX"/"UPCOM"/"HNXINDEX").
+VCI_INDEX_CODES = {"HNX": "HNXIndex", "UPCOM": "HNXUpcomIndex"}
 
 _CACHE_TTL = 30 * 60
 _CACHE_MAX = 256
@@ -93,6 +96,7 @@ def fetch_ohlcv(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
     count_back = len(pd.bdate_range(start, end)) + 5
     to_epoch = int((end + pd.Timedelta(days=1)).tz_localize(vn_rules.VN_TZ).timestamp())
     code = vn_rules.INDEX_ALIASES.get(symbol, symbol)
+    code = VCI_INDEX_CODES.get(code, code)
     payload = http.post_json(
         f"{TRADING_BASE}/chart/OHLCChart/gap-chart",
         vendor=VENDOR,
