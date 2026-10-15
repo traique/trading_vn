@@ -4,7 +4,7 @@ Hệ thống phân tích và **bot giao dịch tự hiệu chỉnh** dành riên
 
 - **Quant Engine** chốt hành động và mọi mức giá bằng code: cùng dữ liệu thì cùng kết quả.
 - **Các agent AI** (analyst, Bull/Bear, Trader, nhóm rủi ro, Portfolio Manager) diễn giải, tranh luận và phản biện quanh quyết định đó. **Output Guard** chặn bằng code những gì AI nói trái với hệ thống.
-- **Bot giao dịch** chạy hai chiến lược trên hai tài khoản ảo, tự hiệu chỉnh ngưỡng mỗi đêm và gửi tín hiệu cho tài khoản thật nếu bạn muốn. Bot **không bao giờ tự gửi lệnh tới công ty chứng khoán**.
+- **Bot giao dịch** chạy ba chiến lược trên ba tài khoản ảo, tự hiệu chỉnh ngưỡng mỗi đêm và gửi tín hiệu cho tài khoản thật nếu bạn muốn. Bot **không bao giờ tự gửi lệnh tới công ty chứng khoán**.
 - **Một tiến trình duy nhất** gồm trang web, bot Telegram và báo cáo tự động. Chạy được trên gói free của Botkeep (2 GB RAM).
 
 Dựa trên [TradingAgents](https://github.com/TauricResearch/TradingAgents) v0.6.0 của Tauric Research (Apache 2.0), đã chuyển hẳn sang thị trường Việt Nam.
@@ -120,28 +120,53 @@ Code kiểm tra văn bản ngay sau Research Manager và sau Trader, **trước 
 
 ## Bot giao dịch
 
-Hai chiến lược chạy song song, mỗi chiến lược một tài khoản ảo 1 tỷ đồng, để so sánh bằng số liệu thật hằng ngày:
+Ba chiến lược chạy song song, mỗi chiến lược một tài khoản ảo 1 tỷ đồng, để so sánh bằng số liệu thật hằng ngày. Tín hiệu cho tài khoản thật mặc định theo **Phòng thủ**.
 
-| | Quant Engine | Động lượng VN30 |
-|---|---|---|
-| Chọn mã | Kế hoạch BUY của engine | Mỗi ~21 phiên, giữ top 5 mã VN30 tăng mạnh nhất ~3 tháng, chia đều vốn |
-| Thoát | Stop, chốt một phần tại T1, T2, hết số phiên, engine chuyển SELL | Mã rời rổ; **về tiền mặt toàn bộ khi VNINDEX dưới MA100** |
-| Backtest 01/2022 – 10/2026 | +2,2%, sụt giảm tối đa 4% | **+91%, sụt giảm tối đa 21%** |
-| Giai đoạn giảm (2022 – 06/2024, VNINDEX −17,6%) | −1,4% | +53% |
-| Giai đoạn tăng (07/2024 – 10/2026, VNINDEX +37%) | +3,7% | +25% |
+| | **Phòng thủ** (mặc định) | Quant Engine | Động lượng VN30 (để so sánh) |
+|---|---|---|---|
+| Chọn mã | 10 mã trong 50 mã vốn hoá lớn nhất (thuộc 100 mã HOSE thanh khoản nhất), xếp hạng theo **biến động 1 năm thấp + gần đỉnh 52 tuần**; dựng lại rổ cuối mỗi tháng, mã đang giữ còn trong top 15 thì giữ | Kế hoạch BUY của engine | Mỗi ~21 phiên, top 5 mã VN30 hiện tại tăng mạnh nhất ~3 tháng |
+| Vào / thoát | Mua giá mở cửa phiên sau, 0,98/10 NAV mỗi mã; bán khi rời rổ; **về tiền mặt khi VNINDEX đóng cửa dưới MA200** (xét phiên cuối mỗi tuần) | Stop, chốt một phần tại T1, T2, hết số phiên, engine chuyển SELL | Mã rời rổ; về tiền mặt khi VNINDEX dưới MA100 |
+| Vòng quay vốn | 2–4 lần/năm | thấp | 7–9 lần/năm |
+| Code | `trading/factor.py` | `quant/`, `trading/simulator.py` | `trading/momentum.py` |
 
-VNINDEX cả kỳ +13,8%. Cả hai backtest dùng đúng luật giao dịch bên dưới.
+### Kết quả kiểm định độc lập (chạy ngày 15/10/2026, dữ liệu tới 14/10/2026)
 
-### Mỗi ngày giao dịch, sau giờ đóng cửa (`DAILY_REPORT_TIME`, mặc định 15:30)
+Chiến lược Phòng thủ được chọn từ 14 ứng viên của 5 nhóm nghiên cứu, theo quy tắc chọn **chốt trước khi chạy giai đoạn TEST**; TEST chỉ chạy một lần. Mọi con số đã trừ phí mua 0,15%, phí bán 0,15% + thuế 0,1%, trượt giá 0,1% mỗi chiều, khớp giá mở cửa phiên sau, T+2, lô 100, bước giá, biên độ/khoá trần sàn (đúng sổ lệnh của bot); vốn 1 tỷ, tiền mặt không có lãi.
 
-1. **Hai tài khoản ảo khớp phiên hôm nay:** lệnh hôm qua khớp hoặc hết hạn; stop và mục tiêu được kiểm tra trên nến hôm nay.
+CAGR / sụt giảm tối đa (Sharpe):
+
+| | TRAIN 2013–2020 | VALID 2021–2023 | **TEST 01/2024–10/2026** | Cả kỳ 2013–10/2026 (một lần chạy) |
+|---|---|---|---|---|
+| **Phòng thủ** | 18,1% / −25,9% (1,37) | 13,9% / −12,0% (0,99) | **8,1% / −20,8% (0,55)** | 15,6% / −25,9% (1,11) |
+| Động lượng (luật cũ của bot), rổ VN30 point-in-time* | 4,3% / −43,9% | 2,9% / −46,4% | 11,8% / −33,1% | 4,7% / −45,2% |
+| Động lượng, cùng rổ 50 mã vốn hoá | 10,7% / −48,9% | 13,4% / −47,5% | 7,5% / −41,3% | 10,9% / −48,9% |
+| VNINDEX mua và giữ (chỉ số giá, không phí) | 12,9% / −45,3% | 0,3% / −40,3% | 15,9% / −18,1% | 10,7% / −45,3% |
+
+\* 30 mã vốn hoá lớn nhất trong 100 mã thanh khoản nhất tại từng thời điểm, xấp xỉ rổ VN30 thật. Con số +73…91% báo trước đây cho luật động lượng được tính trên **rổ VN30 hôm nay** (thiên lệch sống sót: MCH, BSR khi được mua còn ở UPCoM) và chưa đủ chi phí; trên rổ point-in-time luật này chỉ được 0,1–11,8%/năm ở TEST tuỳ rổ.
+
+Đọc kỹ trước khi dùng tiền thật:
+
+- **Lợi thế chính là giảm rủi ro, không phải tăng lợi nhuận.** Sụt giảm tối đa khoảng −26% so với −43…−49% của VNINDEX và luật động lượng; biến động 13–17%/năm. Chênh lệch lợi nhuận ngày so với luật động lượng cùng rổ không có ý nghĩa thống kê.
+- **Thua thị trường trong đợt tăng 2024–2026:** TEST 8,1%/năm so với VNINDEX 15,9%; năm 2025 +21,5% so với +40,9%. Ở TEST nó cũng kém luật động lượng trên rổ VN30 point-in-time (8,1% so với 11,8%, chênh lệch không có ý nghĩa thống kê). Nó thắng rõ ở các năm giảm: 2018 −3,3% (VNINDEX −9,3%), 2022 −4,9% (VNINDEX −32,8%).
+- **Thiên lệch còn lại:** xếp hạng vốn hoá cần số cổ phiếu lưu hành của VCI; 7 mã đã huỷ niêm yết thiếu dữ liệu này nên không bao giờ vào rổ (thiên lệch lạc quan nhỏ). Dữ liệu gồm 568 mã HOSE/từng ở HOSE, trong đó 162 mã đã rời HOSE (huỷ niêm yết hoặc chuyển sang HNX/UPCoM). VNINDEX là chỉ số giá (không cộng cổ tức) nên khoảng cách thật nhỏ hơn 1,5–2 điểm/năm. Giá điều chỉnh quyền tính tới hôm nay.
+- **Độ nhạy:** dời ngày bắt đầu 1–3 tháng, TEST còn 3,4–8,1%/năm; trượt giá gấp đôi −0,6 điểm. Các bộ tham số lân cận (K 5/15, rổ 30/70, buffer 1/2, MA150/250...) cho TEST 4,6–14,9%, trung vị 7,7%: điểm đang dùng không phải điểm may mắn.
+- **Bot dùng luật y hệt bản đã kiểm định,** chỉ khác một điểm: khi hai mã bằng điểm, mã ít biến động hơn được xếp trước (bản kiểm định để pandas tự xếp). Phát lại luật của bot trên cùng dữ liệu cho TRAIN 17,7% / −26,4%, VALID 13,9% / −12,0%, TEST 8,4% / −20,2%, cả kỳ 15,3% / −26,4%; lệnh khớp trùng từng lệnh với bộ khung kiểm định (test `tests/test_factor.py` kiểm tra điều này trên dữ liệu giả lập, kể cả qua bot thật).
+- **Tiền nhàn rỗi:** chiến lược đứng ngoài 20–45% thời gian. Gửi phần tiền mặt vào tiền gửi/quỹ thị trường tiền tệ ~4%/năm cộng thêm khoảng 0,9–2,1 điểm/năm (cả kỳ 17,1%).
+- **Trạng thái ngày 14/10/2026:** VNINDEX 1.704,9 dưới MA200 1.797,9 nên rổ đang **toàn tiền mặt** (từ phiên xét 25/09/2026), đang trong đợt sụt −20,8% bắt đầu 03/02/2026. Bot sẽ đứng ngoài tới khi một phiên cuối tuần đóng cửa trên MA200.
+
+Quant Engine không phải ứng viên trong đợt kiểm định này. Chạy lại theo luật khớp lệnh mới trên rổ VN30 hiện tại (không có dữ liệu dòng tiền), giai đoạn VALID 2021–2023 nó được −1,6%/năm, sụt giảm tối đa −4,7%, gần như luôn đứng ngoài (trung bình 2% vốn). Con số +2,2% báo trước đây được đo trước khi sửa luật T+2 và trượt giá.
+
+### Mỗi ngày giao dịch, sau giờ đóng cửa (`TRADE_TIME`, không sớm hơn 15:05)
+
+1. **Ba tài khoản ảo khớp phiên hôm nay:** lệnh hôm qua khớp hoặc hết hạn; stop và mục tiêu được kiểm tra trên nến hôm nay.
 2. **Ra quyết định và đặt lệnh cho phiên mai:**
+   - Phòng thủ xét VNINDEX so với MA200 ở phiên cuối tuần; cuối tháng (hoặc khi thị trường chuyển tốt) dựng lại rổ từ dữ liệu tới hôm nay: danh sách HOSE (VCI), giá trị khớp lệnh và số cổ phiếu lưu hành (VCI price-history), giá ngày. Rổ vốn hoá được cache theo ngày; nếu không dựng được (nguồn lỗi) thì phiên báo lỗi và được thử lại sau, như khi thiếu nến, chứ không xếp hạng trên một rổ khác.
    - Quant Engine xét VN30 + watchlist + các mã đang giữ.
    - Chiến lược động lượng xếp hạng lại VN30 khi đến kỳ.
 
-   Báo cáo 🤖 / 🚀 / 📊 gửi qua Telegram; NAV được ghi cạnh VNINDEX.
+   Báo cáo 🛡️ / 🤖 / 🚀 / 📊 gửi qua Telegram; NAV được ghi cạnh VNINDEX.
 3. **Phân tích AI đầy đủ** cho từng mã trong watchlist.
-4. **Tự hiệu chỉnh** cả hai chiến lược, rồi gửi kết quả ⚙️.
+4. **Tự hiệu chỉnh** Quant Engine và Động lượng, rồi gửi kết quả ⚙️. Phòng thủ không tự hiệu chỉnh.
 
 Ngày lễ (VNINDEX không có phiên) được bỏ qua.
 
@@ -151,7 +176,7 @@ Paper và backtest dùng chung luật này, nên kết quả backtest đúng là
 
 - **Thứ tự trong phiên:** bán trước, mua sau. Tiền bán dùng được ngay trong phiên.
 - **Mua (Quant Engine):** lệnh giới hạn tại cận trên vùng mua, hiệu lực một phiên. Khối lượng theo % NAV của engine, lô 100, tối đa `max_positions` mã.
-- **Mua/bán (Động lượng):** lệnh giá mở cửa phiên kế tiếp, chia đều vốn cho các mã trong rổ.
+- **Mua/bán (Phòng thủ, Động lượng):** lệnh giá mở cửa phiên kế tiếp, chia đều vốn cho các mã trong rổ; mã đang giữ không mua thêm. Lệnh bị chặn (khoá trần/sàn, tạm ngừng, chưa về T+2) được đặt lại mỗi phiên.
 - **Bán:** từ T+2. Thứ tự ưu tiên:
   1. hệ thống chuyển SELL (bán giá mở cửa);
   2. chạm stop;
@@ -167,7 +192,7 @@ Paper và backtest dùng chung luật này, nên kết quả backtest đúng là
 
 - **`paper`** (mặc định): chỉ dùng tài khoản ảo. Nên chạy vài tháng trước khi dùng tiền thật.
 - **`signal`**: như paper, cộng thêm lệnh đề xuất cho **tài khoản thật**, tính theo vốn bạn khai bằng `/von`.
-  - Lệnh đề xuất theo chiến lược chọn ở `SIGNAL_STRATEGY`: `momentum` (mặc định) hoặc `engine`.
+  - Lệnh đề xuất theo chiến lược chọn ở `SIGNAL_STRATEGY`: `factor` (Phòng thủ, mặc định), `momentum` hoặc `engine`.
   - Bot cảnh báo khi mã đang giữ chạm stop/T1 hoặc rời rổ.
   - Bạn tự đặt lệnh trên app CTCK rồi báo lại bằng `/khop mua FPT 100 56300`.
 
@@ -186,6 +211,7 @@ Code nằm ở `tradingagents/trading/calibrate.py`.
 
 Ngưỡng được hiệu chỉnh:
 - **Quant Engine:** `confidence_buy_min`, `min_rr_ratio`, ngày phân phối, trọng số/ngưỡng dòng tiền, cách thoát lệnh, tỷ trọng, số mã tối đa.
+- **Phòng thủ: không tự hiệu chỉnh.** `fb_top_k` 10, `fb_buffer` 1,5, `fb_market_ma` 200, `fb_universe` 50, `fb_rebalance_months` 1 giữ đúng bộ đã kiểm định. Đợt kiểm định chỉ thử điểm này và từng lân cận đơn lẻ (K 5/15, buffer 1/2, MA150/250...; TEST 4,6–14,9%, K=15 chỉ 4,9%), chưa từng thử một phiên bản tự chỉnh; còn dữ liệu hiệu chỉnh hằng đêm chỉ có các mã hôm nay nên không dựng lại được rổ point-in-time (thiên lệch sống sót). Sửa tay trong `quant_params.json` bị kẹp vào vùng đã thử (K 5–15, buffer 1–2, MA 150–250, rổ 30–70, 1–3 tháng).
 - **Động lượng:** `mom_top_k`, `mom_lookback`, `mom_market_ma`, `mom_rebalance`, `mom_stop_pct`.
 
 Bộ đang dùng nằm trong `quant_params.json`, lịch sử trong `calibration_history.jsonl`. Xem bằng `/hieuchinh` hoặc trang `/bot`.
@@ -222,7 +248,7 @@ Mã nhận các dạng `FPT`, `fpt`, `FPT.VN`, `HOSE:FPT`. Chỉ số (`VNINDEX`
 | `/phantich FPT [YYYY-MM-DD]` | Phân tích đầy đủ bằng các agent (vài phút): quyết định hệ thống tới trước, báo cáo + file HTML tới sau |
 | `/nhanh FPT` | Chỉ quyết định của Quant Engine (vài giây, không tốn quota AI) |
 | `/theodoi FPT,HPG,VCB` / `/theodoi` | Đặt / xem watchlist |
-| `/danhmuc` | Danh mục hai tài khoản ảo (và tài khoản thật ở chế độ `signal`) |
+| `/danhmuc` | Danh mục ba tài khoản ảo (và tài khoản thật ở chế độ `signal`) |
 | `/lenh` | Lệnh bot đặt cho phiên tới |
 | `/hieuchinh` | Ngưỡng đang dùng và kết quả tự hiệu chỉnh gần đây |
 | `/chay` | Chạy ngay phiên giao dịch đã đóng gần nhất cho bot (bỏ qua nếu phiên đó đã chạy) |
@@ -234,7 +260,7 @@ Mã nhận các dạng `FPT`, `fpt`, `FPT.VN`, `HOSE:FPT`. Chỉ số (`VNINDEX`
 ### Trang web
 
 - **Trang chính:** nhập mã, chọn phân tích đầy đủ hoặc chỉ quyết định hệ thống, xem hàng đợi, sửa watchlist, xem trạng thái nhà cung cấp AI.
-- **`/bot`:** biểu đồ NAV hai chiến lược so với VNINDEX, danh mục, lệnh và giao dịch của hai tài khoản ảo; ngưỡng đang dùng; lịch sử tự hiệu chỉnh. Nút **Chạy phiên ngay** làm như `/chay`.
+- **`/bot`:** biểu đồ NAV ba chiến lược so với VNINDEX, danh mục, lệnh và giao dịch của ba tài khoản ảo, rổ Phòng thủ hiện tại; ngưỡng đang dùng; lịch sử tự hiệu chỉnh. Nút **Chạy phiên ngay** làm như `/chay`.
 - **Giao diện sáng / tối:** theo cài đặt của thiết bị, đổi bằng nút mặt trời/mặt trăng trên thanh đầu trang (trình duyệt nhớ lựa chọn). Tông màu trà đào - cam - sả, dùng tốt trên điện thoại.
 - **`/jobs/<id>`, `/reports/<id>`:** tiến trình và báo cáo HTML của từng lượt phân tích.
 
@@ -297,17 +323,20 @@ state, action = ta.propagate("FPT", "2026-10-13")                # BUY / HOLD / 
 ta.save_reports(state, "FPT")
 ```
 
-Backtest hai chiến lược của bot trên dữ liệu lịch sử:
+Backtest các chiến lược của bot trên dữ liệu lịch sử:
 
 ```python
 from tradingagents.dataflows import money_flows as mf
 from tradingagents.quant.params import DEFAULT
-from tradingagents.trading import momentum, simulator as sim
+from tradingagents.trading import factor, momentum, simulator as sim
 
 data = sim.build_dataset(mf.index_members("VN30"), 460, "2026-10-13")
 print(sim.score(sim.run(data, DEFAULT)).line())        # Quant Engine
 print(sim.score(momentum.run(data, DEFAULT)).line())   # Động lượng
+print(sim.score(factor.run(data, DEFAULT)).line())     # Phòng thủ trên rổ cố định (không point-in-time)
 ```
+
+Kết quả kiểm định ở mục [Bot giao dịch](#bot-giao-dịch) dùng rổ vốn hoá point-in-time từ 2013, do bộ khung nghiên cứu riêng chạy (không nằm trong repo); `factor.run` trên `build_dataset` dùng rổ cố định nên chỉ để thử nhanh.
 
 **Danh mục đang nắm giữ:** truyền `PortfolioContext` vào `propagate(..., portfolio=...)` hoặc dùng `tradingagents --portfolio book.json`. Khi đó tín hiệu xấu với mã đang giữ sẽ thành `SELL`/`HOLD`, và có tiền mặt thì khối lượng được tính theo lô 100.
 
@@ -326,7 +355,7 @@ print(sim.score(momentum.run(data, DEFAULT)).line())   # Động lượng
 ```
 tradingagents/
   quant/          Quant Engine: features, policy, params, flow_features, sector, validation, report_format
-  trading/        ledger (sổ lệnh luật VN), simulator, momentum, calibrate
+  trading/        ledger (sổ lệnh luật VN), simulator, factor (Phòng thủ), momentum, calibrate
   agents/         analyst, researcher, trader, risk, manager, output_guard
   dataflows/      DNSE, VCI, CafeF, VNDirect, Google News; cache giá và dòng tiền point-in-time
   market/         vn_rules: biên độ, bước giá, lô, T+2, phiên, phí
@@ -356,10 +385,12 @@ Test không gọi mạng hay AI: dữ liệu và model đều được giả l�
 - **Nguồn dữ liệu không chính thức:** các endpoint DNSE/VCI/CafeF/VNDirect là API công khai mà website của họ dùng, không phải API có cam kết. Chúng có thể đổi hoặc chặn IP nước ngoài.
 - **Backtest có thể đẹp hơn thực tế:**
   - giá đã điều chỉnh quyền tính đến hôm nay;
-  - rổ VN30 lấy theo danh sách hiện tại, nên bỏ sót những mã từng bị loại (thiên lệch sống sót);
+  - Phòng thủ: rổ point-in-time, nhưng 7 mã đã huỷ niêm yết thiếu số cổ phiếu lưu hành nên không vào được rổ; khớp lệnh giả định đúng giá mở cửa cộng trượt giá;
+  - Quant Engine và Động lượng: rổ VN30 lấy theo danh sách hiện tại, nên bỏ sót những mã từng bị loại (thiên lệch sống sót);
   - không phát lại tin tức.
-- **Rủi ro của chiến lược động lượng:** có thể sụt giảm 20–25%, và thua VNINDEX khi thị trường tăng mạnh.
-- **Tự hiệu chỉnh có giới hạn:** chỉ chỉnh ngưỡng của chiến lược có sẵn, không tạo ra lợi thế mới.
+- **Rủi ro của chiến lược Phòng thủ:** sụt giảm tối đa lịch sử −26%, thua VNINDEX trong các đợt tăng mạnh và khi thị trường hồi từ đáy (bộ lọc MA200 vào lại muộn); giai đoạn TEST 2,8 năm quá ngắn để chứng minh lợi thế lợi nhuận.
+- **Rủi ro của chiến lược động lượng:** trên rổ point-in-time, sụt giảm tối đa 33–45% trong giai đoạn TEST 2024–2026, tới 50% ở các giai đoạn khác.
+- **Tự hiệu chỉnh có giới hạn:** chỉ chỉnh ngưỡng của Quant Engine và Động lượng, không tạo ra lợi thế mới; Phòng thủ giữ bộ đã kiểm định.
 
 ## Ghi công
 

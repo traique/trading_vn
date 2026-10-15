@@ -108,7 +108,7 @@ class Settings:
     paper_capital: float = 1_000_000_000.0
     universe_vn30: bool = True      # trade VN30 (plus the watchlist)
     calibrate: bool = True          # nightly self-calibration of the thresholds
-    signal_strategy: str = "momentum"   # which paper strategy the real signals follow
+    signal_strategy: str = "factor"     # which paper strategy the real signals follow
     trade_time: str = DEFAULT_TRADE_TIME  # HH:MM, Vietnam time, >= MIN_TRADE_TIME: bot + calibration
     extra: dict = field(default_factory=dict)
 
@@ -148,7 +148,7 @@ def load() -> Settings:
         paper_capital=float(max(_int("PAPER_CAPITAL", 1_000_000_000), 10_000_000)),
         universe_vn30=_flag("UNIVERSE_VN30", True),
         calibrate=_flag("AUTO_CALIBRATE", True),
-        signal_strategy=_choice("SIGNAL_STRATEGY", ("momentum", "engine"), "momentum"),
+        signal_strategy=_choice("SIGNAL_STRATEGY", ("factor", "momentum", "engine"), "factor"),
         trade_time=_trade_time(report_time),
     )
 

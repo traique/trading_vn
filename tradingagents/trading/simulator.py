@@ -41,8 +41,9 @@ from tradingagents.trading.ledger import Bar, Ledger, Signal
 logger = logging.getLogger(__name__)
 
 START_CASH = 1_000_000_000.0
-# Bars kept before the window: the momentum ranking looks back up to ~150 sessions.
-WARMUP_BARS = 200
+# Bars kept before the window: the momentum ranking looks back up to ~150 sessions,
+# the defensive book's score 252.
+WARMUP_BARS = 260
 
 
 @dataclass
@@ -94,8 +95,11 @@ def _bars(raw: pd.DataFrame, dates_ts: list, first: int, exchange: str | None) -
     return bars
 
 
-def build_dataset(symbols: list[str], sessions: int, as_of: str, *, flows: bool = True) -> Dataset:
-    """Policy inputs for every stock on each of the last ``sessions`` sessions up to ``as_of``."""
+def build_dataset(symbols: list[str], sessions: int, as_of: str, *, flows: bool = True,
+                  inputs: bool = True) -> Dataset:
+    """Policy inputs for every stock on each of the last ``sessions`` sessions up to ``as_of``.
+
+    ``inputs=False``: bars and VNINDEX only (the rotation books need no engine inputs)."""
     from tradingagents.dataflows import money_flows as mf
 
     vni = load_ohlcv(vn_rules.BENCHMARK, as_of)
@@ -153,7 +157,7 @@ def build_dataset(symbols: list[str], sessions: int, as_of: str, *, flows: bool 
         first = max(0, bisect.bisect_left(dates_ts, window[0]) - WARMUP_BARS)
         bars = _bars(raw, dates_ts, first, exchange)
         data.bars[symbol] = bars
-        for day in window:
+        for day in (window if inputs else ()):
             key = day.strftime("%Y-%m-%d")
             if key not in bars:
                 continue                       # suspended that day: no decision

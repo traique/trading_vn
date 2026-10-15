@@ -514,7 +514,8 @@ def test_the_bot_page_shows_the_book_and_the_thresholds(settings, queue, trader)
     client = TestClient(create_app(settings, queue, Watchlist(settings), trader=trader))
     client.auth = ("u", "s3cret")
     page = client.get("/bot").text
-    assert "Quant Engine" in page and "Động lượng VN30" in page and "So sánh hai chiến lược" in page and "FPT" in page
+    assert "Quant Engine" in page and "Động lượng VN30" in page and "So sánh ba chiến lược" in page and "FPT" in page
+    assert "Phòng thủ (mặc định)" in page and "fb_top_k" in page
     assert "confidence_buy_min" in page and "mom_lookback" in page
     assert "/bot" in client.get("/").text
 
@@ -585,6 +586,7 @@ def test_the_momentum_book_rotates_into_the_strongest_stocks(settings, monkeypat
     assert book.meta["mom_basket"] == ["AAA", "CCC"]            # BBB fell: never in the basket
     assert {o.symbol for o in book.orders} == {"AAA", "CCC"}
     object.__setattr__(settings, "trade_mode", "signal")
+    object.__setattr__(settings, "signal_strategy", "momentum")     # the default follows the defensive book
     bot.set_capital(100_000_000)
     report = bot.run_day("2026-10-14")
     assert set(bot.momentum_book().positions) == {"AAA", "CCC"}

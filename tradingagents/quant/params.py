@@ -70,6 +70,12 @@ class Params:
     mom_market_ma: int = 100           # all in cash while VNINDEX closes under this average
     mom_rebalance: int = 21            # sessions between two rankings (~1 month)
     mom_stop_pct: float = 0.0          # per-stock stop under the entry, % (0 = none)
+    # ── Defensive trend book (the default strategy, trading/factor.py) ──
+    fb_universe: int = 50              # the largest market caps among the 100 most liquid HOSE stocks
+    fb_top_k: int = 10                 # stocks held, 0.98/K of NAV each at entry
+    fb_buffer: float = 1.5             # a held stock stays while it ranks in the top buffer x K
+    fb_market_ma: int = 200            # invested only while VNINDEX closes above this average (checked weekly)
+    fb_rebalance_months: int = 1       # rebuild at the end of every N-th month (1 = monthly, 3 = quarterly)
 
 
 # What the calibration may change, and how: (low, high, step).
@@ -101,7 +107,21 @@ MOMENTUM_TUNABLE: dict[str, tuple[float, float, float]] = {
     "mom_rebalance": (10, 42, 5),
     "mom_stop_pct": (0.0, 20.0, 5.0),
 }
-BOUNDS = {**TUNABLE, **MOMENTUM_TUNABLE}
+# The defensive trend book's are NOT tuned: they stay the point that passed the
+# frozen 2026-10-15 evaluation. That evaluation tested only this point and its
+# single neighbours (K 5/15, buffer 1/2, SMA 150/250, universe 30/70, quarterly
+# rebuilds: TEST CAGR 4.6-14.9%, K=15 4.9%); the steps in between and a
+# recalibrating variant were never evaluated, and a nightly dataset of today's
+# names cannot rebuild its point-in-time universe (survivorship). Values set by
+# hand in quant_params.json are clamped to the evaluated range.
+FACTOR_FIXED: dict[str, tuple[float, float, float]] = {
+    "fb_universe": (30, 70, 10),
+    "fb_top_k": (5, 15, 1),
+    "fb_buffer": (1.0, 2.0, 0.25),
+    "fb_market_ma": (150, 250, 25),
+    "fb_rebalance_months": (1, 3, 1),
+}
+BOUNDS = {**TUNABLE, **MOMENTUM_TUNABLE, **FACTOR_FIXED}
 
 DEFAULT = Params()
 

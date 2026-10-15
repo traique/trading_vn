@@ -5,7 +5,7 @@ Hướng dẫn chạy TradingAgents VN liên tục trên Botkeep (hoặc bất k
 - **Trang web**: nhập mã cổ phiếu, xem hàng đợi, đọc báo cáo HTML của các agent, sửa danh sách theo dõi.
 - **Bot Telegram**: `/phantich`, `/nhanh`, `/theodoi`, `/trangthai`, `/id`.
 - **Báo cáo tự động** cho danh sách theo dõi sau giờ đóng cửa mỗi ngày giao dịch (ngày lễ tự bỏ qua).
-- **Bot giao dịch** chạy hai chiến lược song song (Quant Engine và Động lượng VN30), mỗi chiến lược một tài khoản ảo, kèm (tuỳ chọn) lệnh đề xuất cho tài khoản thật. **Mỗi đêm bot tự hiệu chỉnh ngưỡng**. Không bao giờ gửi lệnh tới CTCK.
+- **Bot giao dịch** chạy ba chiến lược song song (Phòng thủ - mặc định, Quant Engine và Động lượng VN30), mỗi chiến lược một tài khoản ảo, kèm (tuỳ chọn) lệnh đề xuất cho tài khoản thật. **Mỗi đêm bot tự hiệu chỉnh ngưỡng** của Quant Engine và Động lượng (Phòng thủ giữ bộ đã kiểm định). Không bao giờ gửi lệnh tới CTCK.
 
 Hành động (BUY / HOLD / WATCH / SELL / NO_TRADE) và mọi mức giá do **Quant Engine** chốt bằng code. Các agent AI (4 analyst, Bull/Bear, Trader, 3 risk, Portfolio Manager) diễn giải quanh quyết định đó, rồi **Output Guard** kiểm tra lại bằng code. Mỗi lần chỉ phân tích một mã để vừa gói free (2 GB RAM, 2 GB ổ đĩa).
 
@@ -90,7 +90,7 @@ Botkeep tự đặt `SERVER_PORT`; chạy nơi khác thì dùng `PORT` (mặc đ
 | `/theodoi FPT,HPG,VCB` | Đặt danh sách báo cáo tự động (tối đa 30 mã) |
 | `/theodoi` | Xem danh sách đang theo dõi |
 | `/trangthai` | Hàng đợi và trạng thái các nhà cung cấp AI |
-| `/danhmuc` | Danh mục cả hai tài khoản ảo (và tài khoản thật ở chế độ `signal`) |
+| `/danhmuc` | Danh mục cả ba tài khoản ảo (và tài khoản thật ở chế độ `signal`) |
 | `/lenh` | Lệnh bot đặt cho phiên tới |
 | `/hieuchinh` | Ngưỡng Quant Engine đang dùng và kết quả tự hiệu chỉnh 5 đêm gần nhất |
 | `/chay` | Chạy ngay (kèm chạy bù) các phiên đã đóng mà bot chưa xử lý; phiên đã chạy thì bỏ qua. Trước 15:05 chỉ tính tới phiên hôm trước |
@@ -113,7 +113,7 @@ Mã nhận được các dạng `FPT`, `fpt`, `FPT.VN`, `HOSE:FPT`. Chỉ số (
 
 Hai lịch chạy độc lập (giờ Việt Nam):
 
-1. **Bot giao dịch** (nếu `TRADE_MODE` khác `off`), mỗi ngày lúc `TRADE_TIME` (mặc định = `DAILY_REPORT_TIME` nếu sau 15:05, ngược lại 15:30; **không bao giờ trước 15:05**, khi nến ngày mới chốt): khớp các phiên chưa xử lý, ra quyết định, đặt lệnh cho phiên tới cho cả hai chiến lược, gửi báo cáo 🤖 Quant Engine, 🚀 Động lượng và 📊 so sánh qua Telegram. Sau đó **tự hiệu chỉnh** (nếu `AUTO_CALIBRATE=1`) trên phiên vừa xử lý, gửi kết quả ⚙️.
+1. **Bot giao dịch** (nếu `TRADE_MODE` khác `off`), mỗi ngày lúc `TRADE_TIME` (mặc định = `DAILY_REPORT_TIME` nếu sau 15:05, ngược lại 15:30; **không bao giờ trước 15:05**, khi nến ngày mới chốt): khớp các phiên chưa xử lý, ra quyết định, đặt lệnh cho phiên tới cho cả ba chiến lược, gửi báo cáo 🛡️ Phòng thủ, 🤖 Quant Engine, 🚀 Động lượng và 📊 so sánh qua Telegram. Sau đó **tự hiệu chỉnh** (nếu `AUTO_CALIBRATE=1`) trên phiên vừa xử lý, gửi kết quả ⚙️.
 2. **Phân tích đầy đủ bằng AI** cho từng mã trong watchlist, thứ Hai - thứ Sáu lúc `DAILY_REPORT_TIME` (có thể đặt buổi sáng; trước giờ đóng cửa phân tích dùng phiên đã đóng gần nhất).
 
 - **Ngày lễ:** bot giao dịch chỉ xử lý những phiên VNINDEX thực sự có nến, nên ngày lễ tự bỏ qua; phân tích watchlist cũng bỏ qua ngày lễ khi chạy sau 15:05.
@@ -123,9 +123,10 @@ Hai lịch chạy độc lập (giờ Việt Nam):
 
 ### Bot giao dịch
 
-- **Bắt đầu:** để `TRADE_MODE=paper` (mặc định) vài tháng. Theo dõi NAV hai chiến lược so với VNINDEX trên trang `/bot` hoặc bằng `/danhmuc`.
-- **Chọn chiến lược cho tín hiệu thật:** `SIGNAL_STRATEGY=momentum` (mặc định) hoặc `engine`.
-  - Động lượng: lãi backtest cao hơn nhiều nhưng có thể sụt giảm 20–25%.
+- **Bắt đầu:** để `TRADE_MODE=paper` (mặc định) vài tháng. Theo dõi NAV ba chiến lược so với VNINDEX trên trang `/bot` hoặc bằng `/danhmuc`.
+- **Chọn chiến lược cho tín hiệu thật:** `SIGNAL_STRATEGY=factor` (Phòng thủ, mặc định), `momentum` hoặc `engine`.
+  - Phòng thủ: được chọn qua kiểm định độc lập ngày 15/10/2026 (xem README chính): 2013–10/2026 15,6%/năm, sụt giảm tối đa −26%; giai đoạn TEST 2024–2026 chỉ 8,1%/năm, thua VNINDEX (15,9%). Lợi thế chính là giảm rủi ro. Mỗi lần dựng rổ (cuối tháng) bot đọc dữ liệu khoảng 400 mã HOSE từ VCI; lần đầu mất vài phút.
+  - Động lượng: con số backtest cũ tính trên rổ VN30 hôm nay (thiên lệch sống sót); trên rổ point-in-time sụt giảm tối đa 33–49%.
   - Quant Engine: rất ít lệnh và rủi ro thấp.
 - **Khi muốn nhận lệnh cho tài khoản thật:**
   1. Đặt `TRADE_MODE=signal` rồi khởi động lại.
@@ -180,8 +181,8 @@ Mỗi lượt gọi AI đi theo `PROVIDER_ORDER` (mặc định `router9,groq,op
 | `TRADE_MODE` | `paper` | `paper` / `signal` / `off` |
 | `PAPER_CAPITAL` | 1.000.000.000 | Vốn tài khoản ảo (VND) |
 | `UNIVERSE_VN30` | 1 | 1 = rổ VN30 + watchlist; 0 = chỉ watchlist |
-| `AUTO_CALIBRATE` | 1 | Tự hiệu chỉnh ngưỡng mỗi đêm |
-| `SIGNAL_STRATEGY` | `momentum` | Chiến lược cho tín hiệu thật: `momentum` / `engine` |
+| `AUTO_CALIBRATE` | 1 | Tự hiệu chỉnh ngưỡng Quant Engine và Động lượng mỗi đêm (Phòng thủ không tự chỉnh) |
+| `SIGNAL_STRATEGY` | `factor` | Chiến lược cho tín hiệu thật: `factor` (Phòng thủ) / `momentum` / `engine` |
 | `DATA_DIR` | `data` | Thư mục dữ liệu (cache, báo cáo, jobs) |
 | `MAX_DEBATE_ROUNDS`, `MAX_RISK_ROUNDS` | 1 / 1 | Số vòng tranh luận |
 | `MAX_TOOL_ROUNDS` | 8 | Số lượt gọi tool tối đa của mỗi analyst |

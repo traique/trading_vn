@@ -226,6 +226,35 @@ def load_stock_flows(symbol: str, as_of: str, *, backfill: bool = False) -> pd.D
     return _upto(foreign, as_of)
 
 
+def load_price_history(symbol: str, as_of: str, *, guarded: bool = True) -> pd.DataFrame:
+    """VCI price-history of one stock up to ``as_of``: matched value, unadjusted close
+    and shares outstanding per session (the cache ``load_stock_flows`` keeps, without
+    the proprietary series). Columns as ``load_stock_flows`` minus PropNet.
+
+    Raises VendorUnavailableError when the series is not cached and VCI did not
+    answer (the defensive book's universe counts those as missing). With
+    ``guarded=False`` the VCI breaker is neither read nor tripped: a caller that
+    asks for hundreds of stocks in a row (the universe build) judges the outage
+    itself, so one failed request does not fail every stock after it."""
+    code = safe_ticker_component(symbol.upper())
+    vendor = _vendor()
+    path = os.path.join(_dir(), f"{code}-foreign.csv")
+    errors: list[VendorError] = []
+
+    def fetch(start: str, end: str) -> pd.DataFrame:
+        call = lambda: vendor.fetch_stock_flows(code, start, end)  # noqa: E731
+        try:
+            return _guarded("VCI", call) if guarded else call()
+        except VendorError as exc:
+            errors.append(exc)
+            raise
+
+    frame = _ensure(path, fetch, False)
+    if frame.empty and errors:
+        raise VendorUnavailableError(f"price-history of {code} unavailable: {errors[-1]}")
+    return _upto(frame, as_of)
+
+
 def load_market_flows(as_of: str, *, backfill: bool = False) -> pd.DataFrame:
     """Market-wide daily foreign and proprietary net value (VND), up to ``as_of``."""
     frame = _ensure(os.path.join(_dir(), "market-flows.csv"),

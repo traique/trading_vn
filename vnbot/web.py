@@ -189,17 +189,28 @@ def _book_card(title: str, book, *, accent: str, sub: str = "") -> str:
     return ui.card(title, body, sub=sub, cls=accent)
 
 
+def _common_start(*books) -> str | None:
+    """The first session every book with a history has: the date the chart indexes on."""
+    starts = [min(h["date"] for h in b.history) for b in books if b.history]
+    return max(starts) if starts else None
+
+
 def _chart(trader) -> str:
-    paper, mom = trader.paper(), trader.momentum_book()
-    dates = sorted({h["date"] for h in paper.history} | {h["date"] for h in mom.history})
+    paper, mom, fb = trader.paper(), trader.momentum_book(), trader.factor_book()
+    dates = sorted({h["date"] for h in paper.history} | {h["date"] for h in mom.history}
+                   | {h["date"] for h in fb.history})
+    # Every line is 100 on the same session (the books started on different days):
+    # the gaps between the lines after it are returns over the same period.
+    base = _common_start(paper, mom, fb) or ""
 
     def indexed(history, key):
         by_day = {h["date"]: h.get(key) for h in history}
-        first = next((by_day[d] for d in dates if by_day.get(d)), None)
+        first = next((by_day[d] for d in dates if d >= base and by_day.get(d)), None)
         return [round(by_day[d] / first * 100, 3) if first and by_day.get(d) else None for d in dates]
 
-    bench_hist = paper.history if len(paper.history) >= len(mom.history) else mom.history
+    bench_hist = max((paper.history, mom.history, fb.history), key=len)
     series = [
+        {"name": "Phòng thủ", "color": "var(--c-factor)", "values": indexed(fb.history, "nav")},
         {"name": "Quant Engine", "color": "var(--c-engine)", "values": indexed(paper.history, "nav")},
         {"name": "Động lượng", "color": "var(--c-mom)", "values": indexed(mom.history, "nav")},
         {"name": "VNINDEX", "color": "var(--c-bench)", "values": indexed(bench_hist, "benchmark"), "dashed": True},
@@ -218,8 +229,8 @@ def _bot_page(trader, msg: str = "") -> str:
     from tradingagents.quant import params as qp
     from tradingagents.trading import calibrate as cal
 
-    mom = trader.momentum_book()
-    basket = mom.meta.get("mom_basket") or []
+    mom, fb = trader.momentum_book(), trader.factor_book()
+    basket = fb.meta.get("fb_basket") or []
     last = trader.last_report()
     running = trader.running
     run_btn = (
@@ -232,24 +243,30 @@ def _bot_page(trader, msg: str = "") -> str:
             f' · tự chạy lúc {html.escape(_run_time(trader))} mỗi ngày (chạy bù phiên bị lỡ)'
             + (f' · phiên gần nhất {html.escape(last["day"])}' if last.get("day") else ""))
     parts = [ui.hero("Bot giao dịch", lead, run_btn), ui.alert(msg, "info")]
-    parts.append(ui.card("So sánh hai chiến lược", _chart(trader),
-                         sub="NAV chỉ số hoá về 100 tại phiên đầu tiên, cùng VNINDEX"))
+    base = _common_start(trader.paper(), mom, fb)
+    parts.append(ui.card("So sánh ba chiến lược", _chart(trader),
+                         sub="NAV chỉ số hoá về 100 tại phiên " + html.escape(base or "đầu tiên")
+                             + " (phiên đầu tiên chung của ba tài khoản), cùng VNINDEX"))
     basket_html = ('<div class="chips">' + "".join(f'<span class="chip">{html.escape(s)}</span>' for s in basket) + "</div>"
                    if basket else "tiền mặt")
+    current = qp.active()
     parts.append('<div class="stack" style="margin-top:16px">'
+                 + _book_card("Phòng thủ (mặc định)", fb, accent="accent-factor",
+                              sub=f"Top {current.fb_top_k} trong {current.fb_universe} mã vốn hoá lớn nhất (ít biến động, "
+                                  f"gần đỉnh 52 tuần), về tiền mặt khi VNINDEX dưới MA{current.fb_market_ma}")
                  + _book_card("Quant Engine", trader.paper(), accent="accent-peach",
                               sub="Kế hoạch BUY của engine: vùng mua, stop, T1/T2")
                  + _book_card("Động lượng VN30", mom, accent="accent-sa",
-                              sub="Top 5 VN30 theo đà tăng, về tiền mặt khi VNINDEX dưới MA100")
+                              sub="Top 5 VN30 theo đà tăng, về tiền mặt khi VNINDEX dưới MA100 (để so sánh)")
                  + "</div>")
-    parts.append(ui.card("Rổ động lượng hiện tại", basket_html if basket else
+    parts.append(ui.card("Rổ phòng thủ hiện tại", basket_html if basket else
                          '<span class="muted">Đang giữ tiền mặt (VNINDEX dưới đường trung bình) hoặc chưa xếp hạng.</span>'))
-    current = qp.active()
     prow = []
-    for k in list(qp.TUNABLE) + list(qp.MOMENTUM_TUNABLE):
+    groups = [(qp.FACTOR_FIXED, "Phòng thủ (cố định)"), (qp.MOMENTUM_TUNABLE, "Động lượng"), (qp.TUNABLE, "Engine")]
+    for k in list(qp.TUNABLE) + list(qp.MOMENTUM_TUNABLE) + list(qp.FACTOR_FIXED):
         default, now = getattr(qp.DEFAULT, k), getattr(current, k)
         changed = default != now
-        group = "Động lượng" if k in qp.MOMENTUM_TUNABLE else "Engine"
+        group = next(name for keys, name in groups if k in keys)
         prow.append(f'<tr class="{"changed" if changed else ""}"><td><code>{html.escape(k)}</code></td>'
                     f'<td class="muted small">{group}</td><td class="num muted">{default}</td>'
                     f'<td class="num"><b>{now}</b></td>'
@@ -265,7 +282,7 @@ def _bot_page(trader, msg: str = "") -> str:
                  + ui.card("Tự hiệu chỉnh hằng đêm",
                            ui.table([("Ngày", ""), ("Chiến lược", ""), ("Kết quả", ""), ("Ghi chú", "")], crow,
                                     f"Chưa chạy hiệu chỉnh - chạy sau phiên đầu tiên lúc {html.escape(_run_time(trader))}."),
-                           sub="Mỗi đêm tối đa một thay đổi nhỏ cho mỗi chiến lược", flush=True)
+                           sub="Quant Engine và Động lượng: mỗi đêm tối đa một thay đổi nhỏ; Phòng thủ giữ bộ đã kiểm định", flush=True)
                  + ui.card("Ngưỡng đang dùng",
                            ui.table([("Ngưỡng", ""), ("Nhóm", ""), ("Mặc định", "num"), ("Đang dùng", "num"), ("", "")],
                                     prow, ""),
@@ -373,14 +390,19 @@ def create_app(settings: Settings, jobs: JobQueue, watchlist: Watchlist, trader=
 <p class="muted small" style="margin:10px 0 0">Phân tích AI tự động lúc {html.escape(settings.daily_report_time)} các ngày giao dịch, gửi qua Telegram.</p>"""
         bot_link = ""
         if trader is not None and settings.trade_mode != "off":
-            paper, mom = trader.paper().stats(), trader.momentum_book().stats()
+            books = [("Phòng thủ", trader.factor_book()), ("Quant Engine", trader.paper()),
+                     ("Động lượng", trader.momentum_book())]
+
+            def kpi(title, book):
+                st = book.stats()
+                since = f' · từ {html.escape(book.start_date)}' if book.start_date else ""
+                return ui.kpi(title, ui.pct(st["return_pct"]), f'NAV {ui.money(st["nav"])}{since}',
+                              ui.tone(st["return_pct"]))
+
             bot_link = ui.card(
                 "Bot giao dịch",
-                '<div class="grid g2">'
-                + ui.kpi("Quant Engine", ui.pct(paper["return_pct"]), f'NAV {ui.money(paper["nav"])}', ui.tone(paper["return_pct"]))
-                + ui.kpi("Động lượng", ui.pct(mom["return_pct"]), f'NAV {ui.money(mom["nav"])}', ui.tone(mom["return_pct"]))
-                + "</div>",
-                sub="Hai tài khoản ảo, tự hiệu chỉnh mỗi đêm",
+                '<div class="grid g3">' + "".join(kpi(t, b) for t, b in books) + "</div>",
+                sub="Ba tài khoản ảo, mỗi tài khoản tính lãi/lỗ từ ngày nó bắt đầu",
                 action='<a class="btn btn-ghost" href="/bot">Xem chi tiết →</a>',
             )
         body = (

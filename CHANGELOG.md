@@ -6,6 +6,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Changes that need action when upgrading are listed under "Upgrading from" in their release.
 
+## [Unreleased]
+
+### Added
+
+- **Defensive trend book** (`trading/factor.py`), now the strategy the real-account signals follow by default (`SIGNAL_STRATEGY=factor`). Ten stocks among the 50 largest market caps of the 100 most liquid HOSE stocks, ranked on low 1-year volatility plus nearness to the 52-week high, rebuilt at each month end with a hold buffer (a held stock stays while it ranks in the top 15); invested only while VNINDEX closes above its 200-session average, checked on the last session of each week. Orders at the next open through the same ledger; no stops or targets. It runs on its own paper book (`paper_factor.json`) beside the Quant Engine and the momentum rotation, which stay as comparison books.
+  - Chosen on 2026-10-15 by an independent evaluation of 14 candidates (data to 2026-10-14, a point-in-time universe of 568 HOSE/ex-HOSE stocks, 162 of which left HOSE (delisted, or moved to HNX/UPCoM), the repo's ledger with fees, tax, slippage, T+2, lots, ticks and limit locks), with the selection rule frozen before the 2024-2026 TEST period was run once. CAGR / max drawdown after costs: TRAIN 2013-2020 18.1% / -25.9%, VALID 2021-2023 13.9% / -12.0%, TEST 01/2024-10/2026 8.1% / -20.8%, 2013-10/2026 15.6% / -25.9% (VNINDEX price index 10.7% / -45.3%; the old momentum rule on a point-in-time VN30 proxy 4.7% / -45.2%). Its edge is drawdown, not return: it trailed VNINDEX (15.9%) and the VN30-proxy momentum rule (11.8%) on TEST. Seven delisted stocks without VCI share counts can never enter the cap ranking (a small optimistic bias).
+  - The live rules make the same decisions as the evaluated research code: replayed through the research harness on the real 2013-2026 data the fills are identical, order for order, and `tests/test_factor.py` replays a synthetic market through a line-by-line port of the harness, the module and `TradingBot.catch_up` session by session. One deliberate difference: equal scores go to the lower volatility (the research code left ties to pandas' unstable sort); with it the replay gives TRAIN 17.7%, VALID 13.9%, TEST 8.4%, 2013-2026 15.3% / -26.4%.
+  - The point-in-time universe is built from the VCI listing, price-history (matched value, unadjusted close, shares outstanding; `money_flows.load_price_history`) and daily bars, only on the sessions that rebuild the basket, and cached per day in `trading/factor_universe.json`. If it cannot be built, the session fails and is retried like a session with a missing bar; the basket is never ranked on another universe. The build reads VCI without the shared 5-minute breaker (one failed request no longer fails every stock after it), asks a failed stock once more, and stops after 10 failures in a row (an outage).
+  - The session after the latest one is guessed from the exchange calendar (`vn_rules.is_session_day`: weekends, fixed-date holidays and a dated table of Tết, Hùng Kings, days in lieu and bridge days for 2026-2030), so a week or month that ends before Tết is seen on its real last session. A closure the table does not know makes the week's check or the month's rebuild run on the next session.
+  - Parameters `fb_universe`, `fb_top_k`, `fb_buffer`, `fb_market_ma`, `fb_rebalance_months` in `quant/params.py` (`FACTOR_FIXED`). The nightly calibration does not touch them: the evaluation tested only this point and its single neighbours (K 5/15, buffer 1/2, SMA 150/250, ...; TEST 4.6-14.9% a year, K=15 4.9%), never a recalibrating variant, and the nightly dataset of today's names cannot rebuild the point-in-time universe. Values set by hand are clamped to the tested range.
+- The daily report, `/danhmuc`, `/lenh`, `/khop` and the `/bot` page (NAV chart, book card, current basket, thresholds) show the three books. Each book's return is dated from its own start, and the chart indexes every line to 100 on the first session all books share.
+- `simulator.build_dataset(..., inputs=False)` builds bars only; `WARMUP_BARS` is 260 (the defensive book's 252-session score).
+
+### Changed
+
+- **The momentum rotation's reported numbers were biased.** Its +73-91% (2022-2026) was measured on today's VN30, which holds stocks that were on UPCoM when it bought them (MCH, BSR). On point-in-time universes the same rule made 0.1-11.8% a year over 2024-2026, with drawdowns of 33-45% (up to 50% in the other periods). It keeps running on its paper book for comparison.
+
+### Upgrading from 0.7.1
+
+- `SIGNAL_STRATEGY` now defaults to `factor`. To keep the real-account signals on the momentum rotation, set `SIGNAL_STRATEGY=momentum` (the Botkeep `.env.example` used to set it explicitly). When the real account holds stocks, the first report after a change of strategy says so: its orders move the real account to the new strategy's basket, which can mean selling everything (on 2026-10-14 the defensive book is in cash). Existing `paper.json` and `paper_momentum.json` books load and continue unchanged; the defensive book starts fresh at the next session. On 2026-10-14 VNINDEX (1,704.9) was below its SMA200 (1,797.9), so the new book starts in cash and stays there until a week closes above it.
+
 ## [0.7.1] — 2026-10-14
 
 ### Added

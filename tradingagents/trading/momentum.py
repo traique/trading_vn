@@ -14,11 +14,19 @@ then filled at the close), from T+3 at the open. A stock that leaves the
 basket is sold; one that stays is not resized, which keeps turnover (and
 fees) down. ``mom_stop_pct`` adds a stop under each entry.
 
-Backtest over 01/2022-10/2026 on today's VN30 (survivorship flatters it),
-measured before slippage and the T+2 afternoon rule were modelled: about +73%
-with a 24% max drawdown, VNINDEX +14%; it lagged VNINDEX in the 2024-2026
-rise. Expect somewhat less now that fills are costed. Past results do not
-promise future ones.
+Since 2026-10-15 this is a comparison book: the real-account signals follow
+the defensive trend book (``factor``) by default. The independent evaluation of
+2026-10-15 (data to 2026-10-14, all costs, next-open fills, T+2) ran this rule
+with the default parameters on point-in-time universes. CAGR / max drawdown:
+
+    universe                          TRAIN 2013-20   VALID 2021-23   TEST 2024-10/2026   2013-10/2026
+    VN30 proxy (30 largest liquid caps)  4.3% / -43.9%   2.9% / -46.4%   11.8% / -33.1%      4.7% / -45.2%
+    50 largest liquid caps              10.7% / -48.9%  13.4% / -47.5%    7.5% / -41.3%     10.9% / -48.9%
+    today's VN30 (biased)               10.9% / -41.5%  -2.1% / -55.0%   26.2% / -22.1%     11.6% / -53.0%
+
+The +73-91% reported earlier for 2022-2026 was measured on today's VN30, which
+holds stocks that were on UPCoM when the rule bought them (MCH, BSR): the
+survivorship flattered it. Past results do not promise future ones.
 """
 
 from __future__ import annotations

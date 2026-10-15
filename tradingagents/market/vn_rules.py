@@ -59,6 +59,36 @@ SELL_FEE_PCT = 0.15
 SELL_TAX_PCT = 0.10  # personal income tax on the sale value
 SLIPPAGE_PCT = 0.10  # per fill, against the trader (see ``slipped``)
 
+# Weekdays the exchanges are closed. Every year: the fixed-date public holidays.
+FIXED_HOLIDAYS = ("01-01", "04-30", "05-01", "09-02")
+# Plus, by date, the lunar ones (Tết, Hùng Kings), the days off in lieu and the
+# bridge days. 2026 is the closures VNINDEX really had (and 24/11, Vietnamese
+# Culture Day, a holiday from 2026); 2027-2030 follow the Labour Code calendar
+# (Tết from the 29th/30th of the last lunar month to the 4th/5th of the first,
+# days off in lieu of a holiday on a weekend). The government adds bridge days
+# year by year: add them here when HOSE announces its calendar.
+MARKET_HOLIDAYS = frozenset({
+    "2026-01-01", "2026-01-02", "2026-02-16", "2026-02-17", "2026-02-18", "2026-02-19", "2026-02-20",
+    "2026-04-27", "2026-04-30", "2026-05-01", "2026-08-31", "2026-09-01", "2026-09-02", "2026-11-24",
+    "2027-01-01", "2027-02-04", "2027-02-05", "2027-02-08", "2027-02-09", "2027-02-10",
+    "2027-04-16", "2027-04-30", "2027-05-03", "2027-09-02", "2027-09-03", "2027-11-24",
+    "2028-01-03", "2028-01-24", "2028-01-25", "2028-01-26", "2028-01-27", "2028-01-28",
+    "2028-04-04", "2028-05-01", "2028-05-02", "2028-09-01", "2028-09-04", "2028-11-24",
+    "2029-01-01", "2029-02-12", "2029-02-13", "2029-02-14", "2029-02-15", "2029-02-16",
+    "2029-04-23", "2029-04-30", "2029-05-01", "2029-09-03", "2029-09-04", "2029-11-26",
+    "2030-01-01", "2030-01-31", "2030-02-01", "2030-02-04", "2030-02-05", "2030-02-06",
+    "2030-04-12", "2030-04-30", "2030-05-01", "2030-09-02", "2030-09-03", "2030-11-25",
+})
+
+
+def is_session_day(day: str) -> bool:
+    """Whether the exchanges are expected to open on ``day`` (YYYY-MM-DD): a weekday that
+    is not a known holiday. A closure the table does not know (an outage, a bridge day
+    not announced yet) is not seen."""
+    d = datetime.strptime(day[:10], "%Y-%m-%d").date()
+    return d.weekday() < 5 and day[5:10] not in FIXED_HOLIDAYS and day[:10] not in MARKET_HOLIDAYS
+
+
 ATO_START, ATO_END = time(9, 0), time(9, 15)
 MORNING_END = time(11, 30)
 AFTERNOON_START = time(13, 0)

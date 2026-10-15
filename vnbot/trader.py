@@ -1,9 +1,14 @@
-"""The trading bot: two paper accounts traded every session, signals for a real one.
+"""The trading bot: three paper accounts traded every session, signals for a real one.
 
-Two strategies run side by side, each on its own paper book:
+Three strategies run side by side, each on its own paper book:
 
+- ``factor`` (the default for signals): the defensive trend book - low
+  volatility and nearness to the 52-week high among the 50 largest liquid HOSE
+  stocks, held only while VNINDEX is above its 200-session average
+  (trading/factor.py; chosen by the independent evaluation of 2026-10-15).
 - ``engine``: the Quant Engine's BUY plans (entry zone, stop, T1/T2).
-- ``momentum``: the momentum rotation over VN30 (trading/momentum.py).
+- ``momentum``: the older momentum rotation over today's VN30
+  (trading/momentum.py), kept as a comparison book.
 
 The report compares them every day; ``SIGNAL_STRATEGY`` picks which one the
 real-account signals follow. After the close (``run_day`` / ``catch_up``):
@@ -23,8 +28,10 @@ real-account signals follow. After the close (``run_day`` / ``catch_up``):
    hits on real holdings are flagged. The real book changes only when its
    owner reports a fill (/khop) or the cash (/von); the bot never writes it.
 
-Then, if enabled, the nightly calibration may move one threshold (see
-``tradingagents.trading.calibrate``). No order is ever sent to a broker.
+Then, if enabled, the nightly calibration may move one threshold of the
+engine and one of the momentum rotation (see ``tradingagents.trading.calibrate``);
+the defensive book keeps the parameters that were evaluated. No order is ever
+sent to a broker.
 """
 
 from __future__ import annotations
@@ -59,6 +66,12 @@ _listing_down_until = 0.0
 # for more than this share of the basket: it is retried later (the source breaker
 # turns a short outage into minutes of failures for every symbol).
 MAX_UNAVAILABLE_SHARE = 0.2
+
+# The defensive book's universe: one build per session it is needed on (month ends,
+# the market filter turning on), cached; after a failed build the last one this many
+# days old at most is used, else the VN30 members.
+UNIVERSE_FILE = "factor_universe.json"
+UNIVERSE_KEEP = 12
 
 
 def _fmt(value: float | None) -> str:
@@ -317,6 +330,15 @@ class TradingBot:
     def momentum_path(self) -> Path:
         return self.dir / "paper_momentum.json"
 
+    @property
+    def factor_path(self) -> Path:
+        return self.dir / "paper_factor.json"
+
+    def factor_book(self):
+        from tradingagents.trading.ledger import Ledger
+
+        return Ledger.load(self.factor_path, self.settings.paper_capital, fresh_on_error=True)
+
     def momentum_book(self):
         from tradingagents.trading.ledger import Ledger
 
@@ -366,9 +388,13 @@ class TradingBot:
         except (OSError, ValueError):
             return {}
 
+    def books(self) -> list[tuple[str, object]]:
+        """(strategy, paper book) of the three strategies, in report order."""
+        return [("engine", self.paper()), ("factor", self.factor_book()), ("momentum", self.momentum_book())]
+
     def last_day(self) -> str:
-        """The last session both paper books have processed ("" before the first run)."""
-        return min(_book_day(self.paper()), _book_day(self.momentum_book()))
+        """The last session every paper book has processed ("" before the first run)."""
+        return min(_book_day(book) for _, book in self.books())
 
     def _write_json(self, name: str, data) -> None:
         write_text_atomic(self.dir / name, json.dumps(data, ensure_ascii=False))
@@ -407,7 +433,7 @@ class TradingBot:
         from tradingagents.quant.params import active
 
         params = active()
-        paper, mom_book = self.paper(), self.momentum_book()
+        paper, mom_book, fb_book = self.paper(), self.momentum_book(), self.factor_book()
         real, real_error = self._real_snapshot()
         market = _Market(min(day, final_day()))
         sessions = market.sessions(vn_rules.BENCHMARK)     # VNINDEX unreadable: raise, retried later
@@ -416,20 +442,24 @@ class TradingBot:
         target = sessions[-1]
         p_todo, p_skipped = _pending(sessions, _book_day(paper))
         m_todo, m_skipped = _pending(sessions, _book_day(mom_book))
+        f_todo, f_skipped = _pending(sessions, _book_day(fb_book))
         last = self.last_report()
-        if not p_todo and not m_todo:
+        if not p_todo and not m_todo and not f_todo:
             if last.get("day") == target and last.get("text"):
                 return RunResult(target, last["text"])
-            if _book_day(paper) != target or _book_day(mom_book) != target:
-                ahead = max(_book_day(paper), _book_day(mom_book))
-                return RunResult(target, f"✅ Phiên {target} đã xử lý (sổ đang ở phiên {ahead}).")
-            # Both books are at the target but its report was lost (a crash before writing it):
+            days = [_book_day(paper), _book_day(mom_book), _book_day(fb_book)]
+            if any(d != target for d in days):
+                return RunResult(target, f"✅ Phiên {target} đã xử lý (sổ đang ở phiên {max(days)}).")
+            # Every book is at the target but its report was lost (a crash before writing it):
             # rebuild it from the books, without processing anything again.
 
         universe = self.universe() if p_todo else None
         engine_out: dict = {}
         for s in p_todo:
             engine_out = self._engine_session(s, sessions, paper, real, market, universe, params, final=s == target)
+        fb_decision = None
+        for s in f_todo:
+            fb_decision = self._factor_session(s, sessions, fb_book, market, params)
         mom_decision = None
         for s in m_todo:
             mom_decision = self._momentum_session(s, sessions, mom_book, market, params)
@@ -445,37 +475,63 @@ class TradingBot:
                     target, paper, real, self.universe() if universe is None else universe, params)
         if mom_decision is None:
             mom_decision = self._decision_from_meta(mom_book, params)
+        if fb_decision is None:
+            fb_decision = self._factor_decision_from_meta(fb_book, params)
 
-        text = self._paper_report(target, paper, [f for f in paper.fills if f.date == target],
-                                  [o for o in paper.orders if o.created == target], signals, errors)
+        text = self._factor_text(target, fb_book, fb_decision, params)
+        text += "\n\n" + self._paper_report(target, paper, [f for f in paper.fills if f.date == target],
+                                            [o for o in paper.orders if o.created == target], signals, errors)
         text += "\n\n" + self._momentum_text(target, mom_book, mom_decision, params)
-        text += "\n\n" + self._comparison(paper, mom_book)
+        text += "\n\n" + self._comparison(paper, mom_book, fb_book)
         if self.settings.trade_mode == "signal":
             if real is None:
                 text += f"\n\n⚠️ Không đọc được tài khoản thật: {real_error}"
             else:
                 real.settle_to(target)               # shares bought T+2 ago are sellable (report only)
                 bars = {s: b for s in real.positions if (b := market.bar(s, target)) is not None}
-                if self.settings.signal_strategy == "momentum":
+                text += self._strategy_switch_notice(last, real)
+                if self.settings.signal_strategy == "factor":
+                    text += "\n\n" + self._real_factor_report(target, real, bars, fb_decision, market, params)
+                elif self.settings.signal_strategy == "momentum":
                     text += "\n\n" + self._real_momentum_report(target, real, bars, mom_decision, market, params)
                 else:
                     text += "\n\n" + self._real_report(target, real, bars, signals, real_only, params)
-        done = sorted(set(p_todo) | set(m_todo))
+        done = sorted(set(p_todo) | set(m_todo) | set(f_todo))
         earlier = [s for s in done if s != target]
         head = []
         if earlier:
             head.append(f"⏪ Chạy bù {len(earlier)} phiên bị lỡ: {', '.join(earlier)}"
-                        + self._missed_fills(earlier, paper, mom_book))
-        if p_skipped or m_skipped:
-            head.append(f"⚠️ Bỏ qua {max(p_skipped, m_skipped)} phiên cũ hơn (chỉ chạy bù tối đa {MAX_CATCH_UP} "
+                        + self._missed_fills(earlier, paper, mom_book, fb_book))
+        if p_skipped or m_skipped or f_skipped:
+            head.append(f"⚠️ Bỏ qua {max(p_skipped, m_skipped, f_skipped)} phiên cũ hơn (chỉ chạy bù tối đa {MAX_CATCH_UP} "
                         "phiên); lệnh chờ của các phiên đó đã huỷ.")
         if head:
             text = "\n".join(head) + "\n\n" + text
         self._write_json("last_report.json", {"day": target, "text": text,
                                               "at": _now_vn().isoformat(timespec="minutes"),
-                                              "sessions": done})
+                                              "sessions": done, "signal_strategy": self.settings.signal_strategy})
         # A rebuilt report (books done, report lost) was never sent either: it is new too.
         return RunResult(target, text, bool(done) or last.get("day") != target, done)
+
+    def _strategy_switch_notice(self, last: dict, real) -> str:
+        """A one-time note when the real signals follow another strategy than in the last
+        report (a changed SIGNAL_STRATEGY, or the default that moved from momentum to
+        factor on 2026-10-15) while the real account holds stocks."""
+        from tradingagents.trading.calibrate import STRATEGIES
+
+        now = self.settings.signal_strategy
+        if not last.get("day") or not real.positions:
+            return ""
+        # Reports written before the key existed followed the old default (momentum),
+        # unless SIGNAL_STRATEGY said otherwise; that cannot be known, so say "probably".
+        before = last.get("signal_strategy")
+        if before == now or (before is None and now == "momentum"):
+            return ""
+        was = STRATEGIES.get(before, before) if before else "có lẽ Động lượng (mặc định cũ)"
+        return (f"\n\nℹ️ Tín hiệu thật đổi chiến lược: {was} → {STRATEGIES.get(now, now)}. "
+                "Lệnh dưới đây đưa tài khoản thật về rổ của chiến lược mới, kể cả bán các mã đang giữ "
+                "theo chiến lược cũ. Muốn giữ chiến lược cũ: đặt SIGNAL_STRATEGY=momentum (hoặc engine) "
+                "trong .env rồi khởi động lại bot.")
 
     def _saved_signals(self, day: str):
         from tradingagents.trading.ledger import Signal
@@ -563,8 +619,7 @@ class TradingBot:
         return self._running.is_set()
 
     def is_done(self, day: str) -> bool:
-        return (min(_book_day(self.paper()), _book_day(self.momentum_book())) >= day
-                and self.last_report().get("day") == day)
+        return self.last_day() >= day and self.last_report().get("day") == day
 
     def start_run(self, notify=None) -> str:
         """Run the last closed session in the background; the report goes to ``notify``."""
@@ -591,7 +646,154 @@ class TradingBot:
                 self._running.clear()
 
         threading.Thread(target=work, name="bot-run-now", daemon=True).start()
-        return f"▶️ Đang chạy phiên {day} cho hai tài khoản ảo (khoảng 1 phút); báo cáo sẽ gửi khi xong."
+        return f"▶️ Đang chạy phiên {day} cho ba tài khoản ảo (khoảng 1 phút); báo cáo sẽ gửi khi xong."
+
+    # ── the defensive book (the default strategy) ──
+    def _factor_session(self, day, sessions, book, market, params):
+        """One session of the defensive book: settle, check the market, rebuild when due,
+        plan, save. Returns the decision."""
+        from tradingagents.market import vn_rules
+        from tradingagents.trading import factor
+
+        i = sessions.index(day)
+        prev = sessions[i - 1] if i else None
+        _expire(book, prev)
+        touched = {o.symbol for o in book.orders} | set(book.positions)
+        bars = {s: b for s in touched if (b := market.bar(s, day, required=True)) is not None}
+        book.process_session(bars, rules=factor.RULES)
+        book.end_of_session(day, market.close(vn_rules.BENCHMARK, day))
+        # The session after ``day`` is known when it is replayed; the latest one's is guessed
+        # (a wrong guess makes the week's check or the month's rebuild run one session late).
+        next_day = sessions[i + 1] if i + 1 < len(sessions) else factor.next_session_guess(day)
+        vni = market.frame(vn_rules.BENCHMARK, day)
+        vni_closes = [float(c) for c in vni["Close"].tail(max(params.fb_market_ma, 1))] if vni is not None else []
+        decision = factor.decide(book, day, next_day, vni_closes, params,
+                                 lambda: self._factor_ranking(day, sessions[: i + 1], market, params))
+        last_close = {}
+        for symbol in set(decision.basket) | set(book.positions):
+            bar = bars.get(symbol) or market.bar(symbol, day, required=symbol in decision.basket)
+            if bar is not None and _finite(bar.close) and bar.close > 0:
+                last_close[symbol] = float(bar.close)
+        factor.plan(book, day, decision, last_close, params)
+        book.meta["last_day"] = day
+        book.save(self.factor_path)
+        return decision
+
+    def _factor_ranking(self, day, sessions, market, params):
+        """The defensive book's ranking on ``day`` (``sessions``: VNINDEX sessions up to it)."""
+        from tradingagents.trading import factor
+
+        universe = self._factor_universe(day, sessions, market, params)
+        names = []
+        for symbol in universe:
+            bar = market.bar(symbol, day, required=True)     # a source down: the session is retried
+            if bar is not None and _finite(bar.close) and bar.close > 0:
+                names.append(symbol)
+        window = sessions[-factor.SCORE_WINDOW:]
+        closes = {}
+        for symbol in names:
+            frame = market.frame(symbol, day)
+            series = {d.strftime("%Y-%m-%d"): float(c) for d, c in zip(frame["Date"], frame["Close"], strict=True)}
+            closes[symbol] = factor.aligned_closes(series, window)
+        return factor.rank(closes, names)
+
+    @property
+    def universe_path(self) -> Path:
+        return self.dir / UNIVERSE_FILE
+
+    def _read_universes(self) -> dict:
+        try:
+            data = json.loads(self.universe_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        days = data.get("days") if isinstance(data, dict) else None
+        return {d: e for d, e in (days or {}).items() if isinstance(e, dict) and isinstance(e.get("universe"), list)}
+
+    def _factor_universe(self, day, sessions, market, params) -> list[str]:
+        """The cap universe on ``day``: built from the vendors once per session and cached.
+
+        When it cannot be built the session fails and is retried later, as for a
+        missing bar: a basket ranked on another universe (an old build, today's
+        VN30) would be held for a month on rules that were never evaluated."""
+        cache = self._read_universes()
+        entry = cache.get(day)
+        if entry and entry.get("size") == params.fb_universe:
+            return list(entry["universe"])
+        try:
+            built = self._build_universe(day, sessions, market, params)
+        except Exception as exc:
+            logger.warning("Bot: cap universe for %s unavailable: %s", day, exc)
+            raise RuntimeError(f"chưa dựng được rổ vốn hoá ngày {day} cho Phòng thủ ({exc}); "
+                               "phiên sẽ được thử lại") from exc
+        cache[day] = {"size": params.fb_universe, "universe": built["universe"], "pool": built["pool"],
+                      "at": _now_vn().isoformat(timespec="minutes")}
+        keep = dict(sorted(cache.items())[-UNIVERSE_KEEP:])
+        self._write_json(UNIVERSE_FILE, {"days": keep})
+        return list(built["universe"])
+
+    def _build_universe(self, day, sessions, market, params) -> dict:
+        from tradingagents.dataflows import money_flows as mf
+        from tradingagents.dataflows.vendors import vci
+        from tradingagents.market import vn_rules
+        from tradingagents.trading import factor
+
+        hose = [str(row.get("symbol", "")).upper() for row in vci.fetch_listing()
+                if isinstance(row, dict) and str(row.get("type", "")).upper() == "STOCK"
+                and vn_rules.normalize_exchange(row.get("board")) == "HOSE"]
+
+        def bars_of(symbol):
+            frame = market.frame(symbol, day, required=True)
+            if frame is None:
+                return None
+            volume = frame["Volume"] if "Volume" in frame else [math.nan] * len(frame)
+            return {d.strftime("%Y-%m-%d"): (float(c), float(v) if _finite(v) else math.nan)
+                    for d, c, v in zip(frame["Date"], frame["Close"], volume, strict=True)}
+
+        def history_of(symbol):
+            frame = mf.load_price_history(symbol, day, guarded=False)     # build_universe judges outages
+            if frame is None or frame.empty:
+                return {}
+            cols = [frame[c] if c in frame else [math.nan] * len(frame) for c in ("MatchValue", "Close", "TotalShares")]
+            return {d.strftime("%Y-%m-%d"): (float(a), float(b), float(c))
+                    for d, a, b, c in zip(frame["Date"], *cols, strict=True)}
+
+        return factor.build_universe(sessions, hose, params.fb_universe, bars_of=bars_of, history_of=history_of)
+
+    @staticmethod
+    def _factor_decision_from_meta(book, params):
+        """The decision of the book's last session, from the state ``factor.decide`` kept."""
+        from tradingagents.trading.factor import Decision
+
+        on = bool(book.meta.get("fb_on", False))
+        note = "" if on else f"VNINDEX dưới MA{params.fb_market_ma} - giữ tiền mặt"
+        return Decision(on, False, list(book.meta.get("fb_basket") or []), note=note)
+
+    def _factor_text(self, day, book, decision, params) -> str:
+        fills = [f for f in book.fills if f.date == day]
+        orders = [o for o in book.orders if o.created == day]
+        st = book.stats()
+        bench_txt = f" | VNINDEX {st['benchmark_pct']:+.2f}%" if st["benchmark_pct"] is not None else ""
+        state = "trên" if decision.market_ok else "dưới"
+        lines = [f"🛡️ BOT PHÒNG THỦ {day}",
+                 f"NAV {_fmt(st['nav'])} ({st['return_pct']:+.2f}% từ {book.start_date or day}){bench_txt} | "
+                 f"sụt giảm tối đa {st['max_drawdown_pct']:.2f}%",
+                 f"Thị trường: VNINDEX {state} MA{params.fb_market_ma} (xét phiên cuối tuần) | rổ: "
+                 + (", ".join(decision.basket) or "tiền mặt")
+                 + (f" ({decision.note})" if decision.note and (decision.rebalanced or not decision.market_ok) else "")]
+        lines += _adjustment_lines(book, day)
+        if fills:
+            lines += [f"- Khớp {f.side} {f.symbol} {_fmt(f.qty)} @ {_fmt(f.price)} ({f.reason})"
+                      + (f", lãi/lỗ {_bn(f.pnl)}" if f.pnl is not None else "") for f in fills]
+        if orders:
+            lines += [f"- Lệnh phiên tới: {'MUA' if o.side == 'BUY' else 'BÁN'} {o.symbol} {_fmt(o.qty)} giá mở cửa ({o.reason})"
+                      for o in orders]
+        return "\n".join(lines)
+
+    def _real_factor_report(self, day, real, bars, decision, market, params) -> str:
+        from tradingagents.trading import factor
+
+        return self._real_rotation_report(day, real, bars, decision, market, params, factor.plan,
+                                          "📣 TÍN HIỆU THẬT - PHÒNG THỦ (tự đặt lệnh, rồi báo /khop)")
 
     # ── the momentum book ──
     def _momentum_session(self, day, sessions, book, market, params):
@@ -653,25 +855,43 @@ class TradingBot:
         return "\n".join(lines)
 
     @staticmethod
-    def _missed_fills(days, paper, mom_book) -> str:
+    def _missed_fills(days, paper, mom_book, fb_book=None) -> str:
         wanted = set(days)
         lines = []
-        for title, book in (("Quant Engine", paper), ("Động lượng", mom_book)):
+        books = [("Phòng thủ", fb_book)] if fb_book is not None else []
+        for title, book in books + [("Quant Engine", paper), ("Động lượng", mom_book)]:
             lines += [f"\n- {f.date} {title}: {f.side} {f.symbol} {_fmt(f.qty)} @ {_fmt(f.price)} ({f.reason})"
                       for f in book.fills if f.date in wanted]
         return "".join(lines) if lines else " (không có lệnh khớp)"
 
     @staticmethod
-    def _comparison(engine_book, mom_book) -> str:
-        a, b = engine_book.stats(), mom_book.stats()
-        return (f"📊 So sánh: Quant Engine {a['return_pct']:+.2f}% (DD {a['max_drawdown_pct']:.1f}%) | "
-                f"Động lượng {b['return_pct']:+.2f}% (DD {b['max_drawdown_pct']:.1f}%)")
+    def _comparison(engine_book, mom_book, fb_book=None) -> str:
+        """Each book's return since its own start (dated: the books may have started on
+        different days, and then the figures cover different periods)."""
+        books = ([("Phòng thủ", fb_book)] if fb_book is not None else []) + [
+            ("Quant Engine", engine_book), ("Động lượng", mom_book)]
+        parts, starts = [], set()
+        for title, book in books:
+            st = book.stats()
+            since = f" từ {book.start_date}" if book.start_date else ""
+            starts.add(book.start_date or "")
+            parts.append(f"{title} {st['return_pct']:+.2f}%{since} (DD {st['max_drawdown_pct']:.1f}%)")
+        text = "📊 So sánh: " + " | ".join(parts)
+        if len(starts) > 1:
+            text += "\n(các tài khoản bắt đầu ở các ngày khác nhau: lợi nhuận không cùng giai đoạn)"
+        return text
 
     def _real_momentum_report(self, day, real, bars, decision, market, params) -> str:
         from tradingagents.trading import momentum
+
+        return self._real_rotation_report(day, real, bars, decision, market, params, momentum.plan,
+                                          "📣 TÍN HIỆU THẬT - ĐỘNG LƯỢNG (tự đặt lệnh, rồi báo /khop)")
+
+    def _real_rotation_report(self, day, real, bars, decision, market, params, planner, title) -> str:
+        """Orders that move the real book to a rotation book's basket (``planner``: its ``plan``)."""
         from tradingagents.trading.ledger import Ledger
 
-        lines = ["📣 TÍN HIỆU THẬT - ĐỘNG LƯỢNG (tự đặt lệnh, rồi báo /khop)"]
+        lines = [title]
         for symbol, pos in real.positions.items():
             bar = bars.get(symbol)
             if bar is not None and bar.tradable and pos.stop and bar.low <= pos.stop:
@@ -686,7 +906,7 @@ class TradingBot:
             close = market.close(symbol, day)
             if close is not None:
                 last[symbol] = close
-        orders = momentum.plan(draft, day, decision, last, params)
+        orders = planner(draft, day, decision, last, params)
         for o in orders:
             pos = real.positions.get(o.symbol)
             if o.side == "SELL" and pos is not None and _pending_lots(pos, day):
@@ -803,7 +1023,9 @@ class TradingBot:
             day = self._fill_day(day, str(real.meta.get("last_day") or ""))
             stop = target1 = target2 = None
             if side == "BUY":
-                if self.settings.signal_strategy == "momentum":
+                if self.settings.signal_strategy == "factor":
+                    pass                        # held until it leaves the basket: no stop, no target
+                elif self.settings.signal_strategy == "momentum":
                     from tradingagents.quant.params import active
 
                     pct = active().mom_stop_pct
@@ -821,7 +1043,9 @@ class TradingBot:
             real.save(self.real_path)
         if side == "BUY":
             pos = real.positions[symbol]
-            if self.settings.signal_strategy == "momentum":
+            if self.settings.signal_strategy == "factor":
+                note = "giữ tới khi rời rổ phòng thủ (hoặc VNINDEX dưới MA)"
+            elif self.settings.signal_strategy == "momentum":
                 note = f"stop {_fmt(pos.stop)}" if pos.stop else "giữ tới khi rời rổ động lượng"
             else:
                 note = (f"stop {_fmt(pos.stop)}, T1 {_fmt(pos.target1)}" if pos.stop
@@ -859,6 +1083,12 @@ class TradingBot:
                  f"{s['trades']} lệnh mua, thắng {s['win_rate_pct'] if s['win_rate_pct'] is not None else '-'}%"]
         lines += [f"- {p.symbol} {_fmt(p.qty)} @ {_fmt(p.avg_price)} → {_fmt(p.last_price)}, stop {_fmt(p.stop)}"
                   for p in paper.positions.values()] or ["- (không giữ mã nào)"]
+        fb = self.factor_book()
+        f = fb.stats()
+        lines.append(f"🛡️ Phòng thủ: NAV {_fmt(f['nav'])} ({f['return_pct']:+.2f}%), tiền {_fmt(fb.cash)}, "
+                     f"rổ {', '.join(fb.meta.get('fb_basket') or []) or 'tiền mặt'}")
+        lines += [f"- {p.symbol} {_fmt(p.qty)} @ {_fmt(p.avg_price)} → {_fmt(p.last_price)}"
+                  for p in fb.positions.values()] or ["- (không giữ mã nào)"]
         mom = self.momentum_book()
         m = mom.stats()
         lines.append(f"🚀 Động lượng: NAV {_fmt(m['nav'])} ({m['return_pct']:+.2f}%), tiền {_fmt(mom.cash)}, "
@@ -880,7 +1110,8 @@ class TradingBot:
 
     def orders_text(self) -> str:
         lines = []
-        for title, book in (("Quant Engine", self.paper()), ("Động lượng", self.momentum_book())):
+        for title, book in (("Phòng thủ", self.factor_book()), ("Quant Engine", self.paper()),
+                            ("Động lượng", self.momentum_book())):
             lines.append(f"{title}:")
             lines += [f"- {o.side} {o.symbol} {_fmt(o.qty)}"
                       + (f" giá ≤ {_fmt(o.limit)}, stop {_fmt(o.stop)}" if o.limit else " giá mở cửa")
@@ -921,4 +1152,7 @@ class TradingBot:
                 data.symbols = [s for s in data.symbols if s in members]
                 data.bars = {s: b for s, b in data.bars.items() if s in members}
             out.append("⚙️ " + cal.calibrate(symbols, day, apply=True, data=data, strategy=strategy).summary())
+        # The defensive book is not calibrated: its parameters stay the ones the
+        # evaluation froze and tested (a recalibrating variant was never evaluated, and
+        # a dataset of today's names cannot rebuild its point-in-time universe).
         return "\n\n".join(out)

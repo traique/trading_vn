@@ -48,7 +48,7 @@ _LIGHT = """
   --peach:#F3B38F; --sa:#5E7A1F; --sa-soft:#EDF2DA; --sa-text:#4A6118;
   --up:#2E7D3A; --up-soft:#E3F1E2; --down:#B83A2E; --down-soft:#FBE4E1; --warn:#A86C12; --warn-soft:#FBEFD9;
   --neutral-soft:#EFE8E1;
-  --c-engine:#E07A45; --c-mom:#3F6E2A; --c-bench:#9A8B80;
+  --c-engine:#E07A45; --c-mom:#3F6E2A; --c-factor:#2F5D8A; --c-bench:#9A8B80;
   --shadow:0 1px 2px rgba(60,40,25,.06),0 8px 24px rgba(60,40,25,.06);
 """
 
@@ -59,7 +59,7 @@ _DARK = """
   --peach:#F0A57D; --sa:#B6C76C; --sa-soft:#2A311A; --sa-text:#C3D27E;
   --up:#86C98A; --up-soft:#1F3321; --down:#F08F84; --down-soft:#3C1F1C; --warn:#E6B45E; --warn-soft:#3A2D16;
   --neutral-soft:#2E2621;
-  --c-engine:#D57446; --c-mom:#4F721C; --c-bench:#8E7F74;
+  --c-engine:#D57446; --c-mom:#4F721C; --c-factor:#7FA7D1; --c-bench:#8E7F74;
   --shadow:0 1px 2px rgba(0,0,0,.3),0 10px 30px rgba(0,0,0,.25);
 """
 
@@ -114,7 +114,7 @@ h2{font-size:16px;font-weight:600;margin:0;letter-spacing:-.005em}
 .card-h .sub{color:var(--muted);font-size:13px}
 .card-b{padding:16px 18px}
 .card-b.flush{padding:0}
-.accent-peach{border-top:3px solid var(--c-engine)}.accent-sa{border-top:3px solid var(--sa)}
+.accent-peach{border-top:3px solid var(--c-engine)}.accent-sa{border-top:3px solid var(--sa)}.accent-factor{border-top:3px solid var(--c-factor)}
 .muted{color:var(--muted)}.small{font-size:13px}
 .dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px;vertical-align:1px}
 /* forms */

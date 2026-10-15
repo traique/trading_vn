@@ -2,7 +2,9 @@
 
 Run once per strategy: ``engine`` moves the Quant Engine's tunables
 (``params.TUNABLE``), ``momentum`` the rotation's (``params.MOMENTUM_TUNABLE``);
-each night may change at most one field of each.
+each night may change at most one field of each. The defensive book
+(``factor``) is not calibrated: its parameters stay the evaluated ones
+(``params.FACTOR_FIXED``).
 
 Each night, on the basket's last ``TRAIN_SESSIONS + HOLDOUT_SESSIONS`` sessions:
 
@@ -80,7 +82,10 @@ MIN_FOLD_SESSIONS = 40
 MIN_SESSIONS_BETWEEN_CHANGES = 20
 HISTORY_FILE = "calibration_history.jsonl"
 
-STRATEGIES = {"engine": "Quant Engine", "momentum": "Động lượng"}
+STRATEGIES = {"factor": "Phòng thủ", "engine": "Quant Engine", "momentum": "Động lượng"}
+# Each calibrated strategy's tunables (a night moves one of them, never another strategy's).
+# "factor" is only a label (for the signal strategy and old history rows): never calibrated.
+STRATEGY_KEYS = {"engine": TUNABLE, "momentum": MOMENTUM_TUNABLE}
 # Challengers that are known sets, not untested moves: the way back and the reset.
 WAY_BACK, RESET = "quay lại bộ trước", "về mặc định"
 KNOWN_SETS = (WAY_BACK, RESET)
@@ -95,7 +100,9 @@ def _runner(strategy: str):
 
 
 def _keys(strategy: str) -> dict:
-    return MOMENTUM_TUNABLE if strategy == "momentum" else TUNABLE
+    if strategy not in STRATEGY_KEYS:
+        raise ValueError(f"strategy {strategy!r} is not calibrated (one of {sorted(STRATEGY_KEYS)})")
+    return STRATEGY_KEYS[strategy]
 
 
 @dataclass
