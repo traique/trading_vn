@@ -157,6 +157,7 @@ def test_every_news_feed_down_is_unavailable(monkeypatch):
 
     monkeypatch.setattr(vci, "fetch_news", down)
     monkeypatch.setattr(vn_news, "cafef_research", down)
+    monkeypatch.setattr(vn_news, "cafef_company_news", down)
     monkeypatch.setattr(vn_news, "google_news", down)
     with pytest.raises(VendorUnavailableError):
         news.get_news("FPT", "2026-10-06", "2026-10-13")
@@ -173,3 +174,28 @@ def test_keyword_sentiment_respects_negation():
 def test_headline_dates_are_utc_aware():
     item = vn_news.Headline("t", "s", datetime(2026, 10, 13, tzinfo=UTC))
     assert item.published.tzinfo is not None
+
+
+CAFEF_FRAGMENT = """<ul class="News_Title_Link">
+<li><span class="timeTitle">13/10/2026 13:46</span>
+<a class='docnhanhTitle' href="/nhan-su-fpt-188261013134651451.chn?utm_source=du-lieu.chn" title="Nhân sự FPT xấp xỉ 90.000 người">x</a></li>
+<li><span class="timeTitle">20/09/2026 08:00</span>
+<a class='docnhanhTitle' href="/cw-fpt.chn" title="Chứng quyền CFPT2501 tăng mạnh">x</a></li>
+<li><span class="timeTitle">01/08/2026 09:00</span>
+<a class='docnhanhTitle' href="/cu.chn" title="Tin cũ ngoài cửa sổ">x</a></li>
+</ul>"""
+
+
+@pytest.mark.unit
+def test_cafef_ticker_news_is_windowed_and_stops_paging_past_the_window(monkeypatch):
+    pages = []
+
+    def get_text(url, **kwargs):
+        pages.append(kwargs["params"]["PageIndex"])
+        return CAFEF_FRAGMENT
+
+    monkeypatch.setattr(vn_news.http, "get_text", get_text)
+    items = vn_news.cafef_company_news("FPT", "2026-09-14", "2026-10-13")
+    assert [i.title for i in items] == ["Nhân sự FPT xấp xỉ 90.000 người"]   # warrant noise and old news dropped
+    assert items[0].url == "https://cafef.vn/nhan-su-fpt-188261013134651451.chn" and items[0].confirmed
+    assert pages == [1]                                                        # oldest row already before the window

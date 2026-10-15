@@ -1,410 +1,378 @@
-<p align="center">
-  <img src="tradingagents/assets/tauric-logo.svg" width="60%" alt="Tauric Research">
-</p>
+# TradingAgents VN
 
-<div align="center" style="line-height: 1;">
-  <a href="https://arxiv.org/abs/2412.20138" target="_blank"><img alt="arXiv" src="https://img.shields.io/badge/arXiv-2412.20138-B31B1B?logo=arxiv"/></a>
-  <a href="https://discord.com/invite/hk9PGKShPK" target="_blank"><img alt="Discord" src="https://img.shields.io/badge/Discord-TradingResearch-7289da?logo=discord&logoColor=white&color=7289da"/></a>
-  <a href="https://x.com/TauricResearch" target="_blank"><img alt="X Follow" src="https://img.shields.io/badge/X-TauricResearch-white?logo=x&logoColor=white"/></a>
-  <a href="https://github.com/TauricResearch/" target="_blank"><img alt="Community" src="https://img.shields.io/badge/GitHub_Community-TauricResearch-14C290?logo=discourse"/></a>
-</div>
-<br>
-<div align="center">
-  <a href="https://github.com/TauricResearch" target="_blank"><img alt="TradingAgents #1 Repository of the Day" src="https://trendshift.io/api/badge/repositories/16192" width="250" height="55"/></a>
-</div>
-<br>
-<div align="center">
-  <!-- Keep these links. Translations will automatically update with the README. -->
-  <a href="https://www.readme-i18n.com/TauricResearch/TradingAgents?lang=de">Deutsch</a> | 
-  <a href="https://www.readme-i18n.com/TauricResearch/TradingAgents?lang=es">Español</a> | 
-  <a href="https://www.readme-i18n.com/TauricResearch/TradingAgents?lang=fr">français</a> | 
-  <a href="https://www.readme-i18n.com/TauricResearch/TradingAgents?lang=ja">日本語</a> | 
-  <a href="https://www.readme-i18n.com/TauricResearch/TradingAgents?lang=ko">한국어</a> | 
-  <a href="https://www.readme-i18n.com/TauricResearch/TradingAgents?lang=pt">Português</a> | 
-  <a href="https://www.readme-i18n.com/TauricResearch/TradingAgents?lang=ru">Русский</a> | 
-  <a href="https://www.readme-i18n.com/TauricResearch/TradingAgents?lang=zh">中文</a>
-</div>
+Hệ thống phân tích và **bot giao dịch tự hiệu chỉnh** dành riêng cho cổ phiếu Việt Nam (HOSE, HNX, UPCoM).
+
+- **Quant Engine** chốt hành động và mọi mức giá bằng code: cùng dữ liệu thì cùng kết quả.
+- **Các agent AI** (analyst, Bull/Bear, Trader, nhóm rủi ro, Portfolio Manager) diễn giải, tranh luận và phản biện quanh quyết định đó. **Output Guard** chặn bằng code những gì AI nói trái với hệ thống.
+- **Bot giao dịch** chạy hai chiến lược trên hai tài khoản ảo, tự hiệu chỉnh ngưỡng mỗi đêm và gửi tín hiệu cho tài khoản thật nếu bạn muốn. Bot **không bao giờ tự gửi lệnh tới công ty chứng khoán**.
+- **Một tiến trình duy nhất** gồm trang web, bot Telegram và báo cáo tự động. Chạy được trên gói free của Botkeep (2 GB RAM).
+
+Dựa trên [TradingAgents](https://github.com/TauricResearch/TradingAgents) v0.6.0 của Tauric Research (Apache 2.0), đã chuyển hẳn sang thị trường Việt Nam.
+
+> Chỉ dùng cho nghiên cứu và tham khảo, **không phải khuyến nghị đầu tư**. Kết quả quá khứ không bảo đảm tương lai.
 
 ---
 
-# TradingAgents: Multi-Agents LLM Financial Trading Framework
+## Mục lục
 
-## News
+- [Bắt đầu nhanh](#bắt-đầu-nhanh)
+- [Cách hệ thống ra quyết định](#cách-hệ-thống-ra-quyết-định)
+- [Bot giao dịch](#bot-giao-dịch)
+- [Dữ liệu](#dữ-liệu)
+- [Sử dụng](#sử-dụng)
+- [Chạy trên máy cá nhân, Docker, thư viện Python](#chạy-trên-máy-cá-nhân-docker-thư-viện-python)
+- [Bộ nhớ, checkpoint và backtest](#bộ-nhớ-checkpoint-và-backtest)
+- [Cấu trúc mã nguồn](#cấu-trúc-mã-nguồn)
+- [Phát triển và kiểm thử](#phát-triển-và-kiểm-thử)
+- [Giới hạn cần biết](#giới-hạn-cần-biết)
+- [Ghi công](#ghi-công)
 
-<!-- news:start -->
-- [2026-10] **TradingAgents v0.6.0** released with reports saved as one HTML page, a provider per model tier so the managers and analysts can run on different models, past decisions settled for every ticker while the analysts work, and company news read from Yahoo search while Yahoo's news feed is down.
-- [2026-09] **TradingAgents v0.5.2** released with parallel analysts for a faster analysis, a CLI that runs without prompts from flags such as `--ticker` and `--date`, the run's settings recorded in every report, and backtests that see only data published by each analysis date.
-- [2026-09] **TradingAgents v0.5.1** released with a package layout organised by what each module holds (import paths moved), optional Jev screening of social posts, GPT-6 Sol and Luna as the default models, and fixes to run isolation and SEC EDGAR statements.
+---
 
-Full release notes are in [CHANGELOG.md](CHANGELOG.md).
+## Bắt đầu nhanh
 
-<details>
-<summary>Earlier news</summary>
+### Trên Botkeep (khuyến nghị)
 
-- [2026-09] **TradingAgents v0.5.0** released with point-in-time integrity across every dated path, SEC EDGAR fundamentals served as filed, backtesting over a ticker and date grid, portfolio-aware runs, and current model lineups across every provider.
-- [2026-08] **TradingAgents v0.4.0** released with look-ahead / point-in-time fixes across FRED macro, social sentiment, and the decision-log memory; clearer decision signals; working CLI checkpoint resume; Trader price grounding; and the GPT-5.6 and GLM-5.3 models.
-- [2026-07] **TradingAgents v0.3.1** released with correctness and stability fixes: Alpha Vantage look-ahead filtering, graph-router crash-safety, graph-shape-aware checkpoint resume, working crypto sentiment sources, a configurable LLM retry budget, Bedrock API-key auth, and Claude Sonnet 5 / Fable 5 support.
-- [2026-06] **TradingAgents v0.3.0** released with a verified data-access contract, an expanded provider registry (NVIDIA, Kimi, Groq, Mistral, Bedrock, and any OpenAI-compatible endpoint), FRED and Polymarket data vendors, a current-generation model catalog, and a CI gate.
-- [2026-05] **TradingAgents v0.2.5** released with the grounded Sentiment Analyst, GPT-5.5 etc. model coverage, Qwen/GLM/MiniMax dual-region support, `TRADINGAGENTS_*` env-var configurability with API-key auto-detection, remote Ollama support, non-US alpha benchmarks, and ticker path-traversal hardening.
-- [2026-04] **TradingAgents v0.2.4** released with structured-output agents (Research Manager, Trader, Portfolio Manager), LangGraph checkpoint resume, persistent decision log, DeepSeek/Qwen/GLM/Azure provider support, Docker, and a Windows UTF-8 encoding fix.
-- [2026-03] **TradingAgents v0.2.3** released with multi-language support, GPT-5.4 family models, unified model catalog, backtesting date fidelity, and proxy support.
-- [2026-03] **TradingAgents v0.2.2** released with GPT-5.4/Gemini 3.1/Claude 4.6 model coverage, five-tier rating scale, OpenAI Responses API, Anthropic effort control, and cross-platform stability.
-- [2026-02] **TradingAgents v0.2.0** released with multi-provider LLM support (GPT-5.x, Gemini 3.x, Claude 4.x, Grok 4.x) and improved system architecture.
-- [2026-01] **Trading-R1** [Technical Report](https://arxiv.org/abs/2509.11420) released, with [Terminal](https://github.com/TauricResearch/Trading-R1) expected to land soon.
-
-</details>
-<!-- news:end -->
-
-<div align="center">
-
-🚀 [TradingAgents](#tradingagents-framework) | ⚡ [Installation & CLI](#installation-and-cli) | 🎬 [Demo](https://www.youtube.com/watch?v=90gr5lwjIho) | 📦 [Package Usage](#tradingagents-package) | 🤝 [Contributing](#contributing) | 📄 [Citation](#citation)
-
-</div>
-
-> 🎉 **TradingAgents** officially released! We have received numerous inquiries about the work, and we would like to express our thanks for the enthusiasm in our community.
->
-> So we decided to fully open-source the framework. Looking forward to building impactful projects with you!
-
-## TradingAgents Framework
-
-TradingAgents is a multi-agent trading framework that mirrors the dynamics of real-world trading firms. By deploying specialized LLM-powered agents: from fundamental analysts, sentiment experts, and technical analysts, to trader, risk management team, the platform collaboratively evaluates market conditions and informs trading decisions. Moreover, these agents engage in dynamic discussions to pinpoint the optimal strategy.
-
-<p align="center">
-  <img src="assets/schema.png" style="width: 100%; height: auto;">
-</p>
-
-> TradingAgents framework is designed for research purposes. Trading performance may vary based on many factors, including the chosen backbone language models, model temperature, trading periods, the quality of data, and other non-deterministic factors. [It is not intended as financial, investment, or trading advice.](https://tauric.ai/disclaimer/)
-
-Our framework decomposes complex trading tasks into specialized roles.
-
-### Vietnamese market edition
-
-This edition analyses **Vietnamese stocks only** (HOSE, HNX, UPCoM), benchmarked against **VNINDEX**, with reports in Vietnamese by default:
-
-- **Data**: daily prices from DNSE with VCI as fallback (VND, adjusted for dividends and bonus issues); financial statements, ratios, corporate events and company disclosures from VCI; broker research from CafeF; news from Google News (Vietnamese edition). All public, no key, no Yahoo.
-- **Point-in-time**: a run dated D sees only closed sessions up to D (today's forming bar is dropped during the session), statements published by D (VCI records each statement's publication date), and news dated inside its window. Live-only data (foreign ownership, analyst targets) is withheld from past runs.
-- **The system decides, the agents explain**: a deterministic **Quant Engine** (ported from the lananh-main policy layer) runs beside the analysts and fixes the action - `BUY`, `HOLD`, `WATCH`, `SELL` (exit a holding; no short selling) or `NO_TRADE` - with the entry zone, stop, targets, risk/reward (at least 1.5) and position size. The researchers, trader, risk team and portfolio manager argue and explain around that decision but cannot change it. A final **Output Guard** node checks their text in code: a contradicting action is replaced by the system summary, a price found in none of the data is flagged, and the final rating is always the engine's.
-- **Market rules**: price bands (HOSE ±7%, HNX ±10%, UPCoM ±15%), tick sizes (HOSE 10/50/100đ, HNX/UPCoM 100đ), board lots of 100, T+2 settlement (no exit before the third session), ATO/ATC sessions, and round-trip costs live in `tradingagents/market/vn_rules.py`.
-- **Always-on host (Botkeep)**: `main_botkeep.py` runs a web page and a Telegram bot in one process, with the AI provider chain 9Router → Groq → OpenRouter → Grok (`llm_provider: "router9_chain"`). `python scripts/build_botkeep_bundle.py` builds a 99-file upload; see [deploy/botkeep/README.md](deploy/botkeep/README.md).
-
-### Analyst Team
-- Fundamentals Analyst: Evaluates company financials and performance metrics, identifying intrinsic values and potential red flags.
-- Sentiment Analyst: Reads the Vietnamese news flow (company disclosures, broker research, press) against a fixed keyword baseline and, for today's runs, foreign ownership, into a single sentiment read.
-- News Analyst: Monitors global news and macroeconomic indicators, interpreting the impact of events on market conditions.
-- Technical Analyst: Utilizes technical indicators (like MACD and RSI) to detect trading patterns and forecast price movements.
-
-The selected analysts work at the same time, each on its own tools, and the research debate starts once all of their reports are in.
-
-<p align="center">
-  <img src="assets/analyst.png" width="100%" style="display: inline-block; margin: 0 2%;">
-</p>
-
-### Researcher Team
-- Comprises both bullish and bearish researchers who critically assess the insights provided by the Analyst Team. Through structured debates, they balance potential gains against inherent risks.
-
-<p align="center">
-  <img src="assets/researcher.png" width="70%" style="display: inline-block; margin: 0 2%;">
-</p>
-
-### Trader Agent
-- Composes reports from the analysts and researchers to make informed trading decisions, determining the timing and magnitude of trades.
-
-<p align="center">
-  <img src="assets/trader.png" width="70%" style="display: inline-block; margin: 0 2%;">
-</p>
-
-### Risk Management and Portfolio Manager
-- Continuously evaluates portfolio risk by assessing market volatility, liquidity, and other risk factors. The risk management team evaluates and adjusts trading strategies, providing assessment reports to the Portfolio Manager for final decision.
-- The Portfolio Manager approves/rejects the transaction proposal. If approved, the order will be sent to the simulated exchange and executed.
-
-<p align="center">
-  <img src="assets/risk.png" width="70%" style="display: inline-block; margin: 0 2%;">
-</p>
-
-## Installation and CLI
-
-### Installation
-
-Clone TradingAgents:
 ```bash
-git clone https://github.com/TauricResearch/TradingAgents.git
-cd TradingAgents
+git clone https://github.com/traique/trading_vn.git
+cd trading_vn
+python scripts/build_botkeep_bundle.py      # → dist/tradingagents-vn-botkeep.zip (~110 file, ~280 KB)
 ```
 
-TradingAgents needs Python 3.11 or later. Create a virtual environment in any of your favorite environment managers:
+1. Trên Botkeep, tạo workload **Python 3.11+**, upload rồi giải nén zip vào thư mục gốc.
+2. Đặt file khởi động là `main_botkeep.py`, file requirements là `requirements.txt`.
+3. Vào tab **Environment** và điền tối thiểu:
+   - **Một nhà cung cấp AI:** `ROUTER9_BASE_URL` + `ROUTER9_API_KEY`, hoặc `GROQ_API_KEY` / `OPENROUTER_API_KEY`.
+   - **Web:** `WEB_PASSWORD` (**bắt buộc**, thiếu thì trang web bị khoá) và `PUBLIC_URL`.
+   - **Telegram:** `TELEGRAM_TOKEN`. Khởi động bot, gửi `/id` cho bot, điền id vào `TELEGRAM_ALLOWED_IDS`, rồi Restart.
+4. Restart rồi kiểm tra log:
+   - log có `AI provider chain: ...` và `Trading bot: mode paper, calibration on`;
+   - mở web, thử **Chỉ quyết định hệ thống** với `FPT`.
+
+Hướng dẫn đầy đủ (từng bước, toàn bộ biến môi trường, xử lý sự cố): **[deploy/botkeep/README.md](deploy/botkeep/README.md)**. File này cũng có trong gói upload.
+
+### Trên VPS / máy bất kỳ
+
 ```bash
-conda create -n tradingagents python=3.13
-conda activate tradingagents
+pip install ".[bot]"
+cp deploy/botkeep/.env.example .env        # điền như trên
+python main_botkeep.py                     # web ở http://localhost:8080
 ```
 
-Or with [uv](https://docs.astral.sh/uv/):
-```bash
-uv venv --python 3.13
-source .venv/bin/activate
+Hoặc dùng Docker: `docker compose --profile bot up -d bot`.
+
+---
+
+## Cách hệ thống ra quyết định
+
+```
+Mã + ngày
+   ├─► Analyst (song song): Market · Sentiment · News · Fundamentals
+   └─► Quant Engine (code): giá, VNINDEX, ngành, tin, dòng tiền
+          → BUY / HOLD / WATCH / SELL / NO_TRADE
+          + vùng mua, cắt lỗ, mục tiêu, R:R, tỷ trọng
+                 │
+                 ▼
+Bull ⇄ Bear → Research Manager ─[Guard]→ Trader ─[Guard]→ Risk (3 góc nhìn) → Portfolio Manager
+                 │
+                 ▼
+Output Guard (code) → báo cáo Markdown + HTML
 ```
 
-Install the package and its dependencies (`uv pip install .` with uv):
+### Quant Engine
+
+`tradingagents/quant/` là một pipeline xác định, không gọi AI:
+
+1. **Regime VNINDEX.** Xu hướng đa khung thời gian, ADX và số ngày phân phối xếp thị trường vào `risk_on` / `neutral` / `risk_off`. Hai điều kiện có thể hạ regime xuống một bậc mỗi điều kiện:
+   - khối ngoại bán ròng toàn thị trường kéo dài;
+   - phân kỳ độ rộng: VNINDEX lập đỉnh 20 phiên trong khi số mã tăng yếu đi.
+
+   Khi `risk_off` hoặc thiếu dữ liệu VNINDEX thì **không mở mua mới**.
+2. **Setup của mã.** MA, RSI, MACD, ADX, hỗ trợ/kháng cự theo swing, thanh khoản, sức mạnh tương đối so với VNINDEX (ghép theo ngày giao dịch), ngành.
+3. **Dòng tiền.** Độ tin cậy được nâng hoặc hạ theo các tín hiệu sau:
+   - khối ngoại mua ròng liên tiếp, hoặc bán ròng 7/10 phiên;
+   - tự doanh cùng chiều với khối ngoại;
+   - dòng tiền ETF với mã thuộc VN30;
+   - room khối ngoại gần hết thì bỏ qua tín hiệu mua của khối ngoại.
+4. **Chất lượng dữ liệu.** Phát hiện chuỗi giá chưa điều chỉnh quyền (theo biên độ của từng sàn), dữ liệu cũ hoặc thiếu.
+5. **Kế hoạch giao dịch.** Vùng mua, cắt lỗ, T1/T2 (R:R tối thiểu 1,5), tỷ trọng theo rủi ro 1% NAV, làm tròn theo bước giá và lô 100.
+
+Mọi ngưỡng nằm trong `tradingagents/quant/params.py`. Giá trị mặc định là bộ ngưỡng gốc; bot tự hiệu chỉnh dần (xem [Bot giao dịch](#bot-giao-dịch)).
+
+### Output Guard
+
+Code kiểm tra văn bản ngay sau Research Manager và sau Trader, **trước khi** các agent sau đọc (nên nhóm rủi ro và Portfolio Manager không bị dẫn dắt bởi một khuyến nghị sai), rồi kiểm tra lần cuối cả ba văn bản:
+
+- **Nói ngược hành động của hệ thống** (ví dụ "MUA", "giải ngân", "tăng tỷ trọng" khi hệ thống `NO_TRADE`): đoạn đó bị thay bằng bản tóm tắt của hệ thống. Những câu sau **không** bị tính là mâu thuẫn: câu điều kiện ("nếu thủng stop thì BÁN"), luật giao dịch ("T+2 mới được BÁN"), và mô tả thị trường ("khối ngoại bán ròng", "lực BÁN").
+- **Nêu giá không có trong dữ liệu:** gắn cảnh báo. Điểm chỉ số, khối lượng, EPS và giá trị tính bằng tỷ không bị coi là giá cổ phiếu.
+- **`final_rating` luôn là hành động của Quant Engine.** Khi hệ thống không đưa kế hoạch (WATCH/NO_TRADE), báo cáo cũng không có stop, mục tiêu hay R:R.
+
+### Quy tắc thị trường Việt Nam
+
+`tradingagents/market/vn_rules.py` gồm:
+- **Biên độ:** HOSE ±7%, HNX ±10%, UPCoM ±15%. Cổ phiếu giá rất thấp vẫn có biên độ tối thiểu ±1 bước giá.
+- **Bước giá:** HOSE 10/50/100đ, HNX/UPCoM 100đ.
+- **Lô 100, T+2.**
+- **Phiên ATO/ATC.**
+- **Phí và thuế:** phí mua/bán và thuế bán 0,1%.
+
+---
+
+## Bot giao dịch
+
+Hai chiến lược chạy song song, mỗi chiến lược một tài khoản ảo 1 tỷ đồng, để so sánh bằng số liệu thật hằng ngày:
+
+| | Quant Engine | Động lượng VN30 |
+|---|---|---|
+| Chọn mã | Kế hoạch BUY của engine | Mỗi ~21 phiên, giữ top 5 mã VN30 tăng mạnh nhất ~3 tháng, chia đều vốn |
+| Thoát | Stop, chốt một phần tại T1, T2, hết số phiên, engine chuyển SELL | Mã rời rổ; **về tiền mặt toàn bộ khi VNINDEX dưới MA100** |
+| Backtest 01/2022 – 10/2026 | +2,2%, sụt giảm tối đa 4% | **+91%, sụt giảm tối đa 21%** |
+| Giai đoạn giảm (2022 – 06/2024, VNINDEX −17,6%) | −1,4% | +53% |
+| Giai đoạn tăng (07/2024 – 10/2026, VNINDEX +37%) | +3,7% | +25% |
+
+VNINDEX cả kỳ +13,8%. Cả hai backtest dùng đúng luật giao dịch bên dưới.
+
+### Mỗi ngày giao dịch, sau giờ đóng cửa (`DAILY_REPORT_TIME`, mặc định 15:30)
+
+1. **Hai tài khoản ảo khớp phiên hôm nay:** lệnh hôm qua khớp hoặc hết hạn; stop và mục tiêu được kiểm tra trên nến hôm nay.
+2. **Ra quyết định và đặt lệnh cho phiên mai:**
+   - Quant Engine xét VN30 + watchlist + các mã đang giữ.
+   - Chiến lược động lượng xếp hạng lại VN30 khi đến kỳ.
+
+   Báo cáo 🤖 / 🚀 / 📊 gửi qua Telegram; NAV được ghi cạnh VNINDEX.
+3. **Phân tích AI đầy đủ** cho từng mã trong watchlist.
+4. **Tự hiệu chỉnh** cả hai chiến lược, rồi gửi kết quả ⚙️.
+
+Ngày lễ (VNINDEX không có phiên) được bỏ qua.
+
+### Luật giao dịch
+
+Paper và backtest dùng chung luật này, nên kết quả backtest đúng là điều tài khoản ảo sẽ làm.
+
+- **Thứ tự trong phiên:** bán trước, mua sau. Tiền bán dùng được ngay trong phiên.
+- **Mua (Quant Engine):** lệnh giới hạn tại cận trên vùng mua, hiệu lực một phiên. Khối lượng theo % NAV của engine, lô 100, tối đa `max_positions` mã.
+- **Mua/bán (Động lượng):** lệnh giá mở cửa phiên kế tiếp, chia đều vốn cho các mã trong rổ.
+- **Bán:** từ T+2. Thứ tự ưu tiên:
+  1. hệ thống chuyển SELL (bán giá mở cửa);
+  2. chạm stop;
+  3. bán một phần tại T1 rồi dời stop về hoà vốn;
+  4. phần còn lại tại T2;
+  5. hết số phiên giữ.
+
+  Nếu một phiên chạm cả stop lẫn mục tiêu, giả định stop chạm trước.
+- **Phiên trắng bên:** khoá trần thì không mua được, khoá sàn thì không bán được.
+- **Phí:** phí mua/bán và thuế bán được trừ trên mọi lệnh khớp.
+
+### Hai chế độ (`TRADE_MODE`)
+
+- **`paper`** (mặc định): chỉ dùng tài khoản ảo. Nên chạy vài tháng trước khi dùng tiền thật.
+- **`signal`**: như paper, cộng thêm lệnh đề xuất cho **tài khoản thật**, tính theo vốn bạn khai bằng `/von`.
+  - Lệnh đề xuất theo chiến lược chọn ở `SIGNAL_STRATEGY`: `momentum` (mặc định) hoặc `engine`.
+  - Bot cảnh báo khi mã đang giữ chạm stop/T1 hoặc rời rổ.
+  - Bạn tự đặt lệnh trên app CTCK rồi báo lại bằng `/khop mua FPT 100 56300`.
+
+### Tự hiệu chỉnh hằng đêm (champion / challenger)
+
+Code nằm ở `tradingagents/trading/calibrate.py`.
+
+1. **Chia dữ liệu:** lấy 460 phiên gần nhất; 400 phiên để huấn luyện, 60 phiên mới nhất để kiểm tra.
+2. **Ứng viên:** bộ ngưỡng hiện tại với **một** ngưỡng dịch **một** bước, bộ ngưỡng trước đó (để quay lại), và bộ mặc định.
+3. **Điều kiện chọn:** một ứng viên chỉ được chọn khi đạt cả bốn điều kiện:
+   - thắng rõ trên phần huấn luyện, với ít nhất 6 lệnh mua;
+   - **không thua trên 60 phiên kiểm tra** (phần nó không được chọn dựa vào). Nếu có từ 2 lệnh trở lên ở phần này thì phải thắng hẳn; thị trường im ắng thì chỉ cần không kém hơn;
+   - sụt giảm tối đa không xấu hơn quá 2 điểm so với bộ hiện tại;
+   - sụt giảm tối đa **không vượt 25%**.
+4. **Điểm số:** lợi nhuận % − ½ sụt giảm tối đa %.
+
+Ngưỡng được hiệu chỉnh:
+- **Quant Engine:** `confidence_buy_min`, `min_rr_ratio`, ngày phân phối, trọng số/ngưỡng dòng tiền, cách thoát lệnh, tỷ trọng, số mã tối đa.
+- **Động lượng:** `mom_top_k`, `mom_lookback`, `mom_market_ma`, `mom_rebalance`, `mom_stop_pct`.
+
+Bộ đang dùng nằm trong `quant_params.json`, lịch sử trong `calibration_history.jsonl`. Xem bằng `/hieuchinh` hoặc trang `/bot`.
+
+---
+
+## Dữ liệu
+
+Tất cả công khai, **không cần key**, gọi thẳng API/HTML (không dùng trình duyệt):
+
+| Loại | Nguồn |
+|---|---|
+| Giá ngày (đã điều chỉnh quyền), chỉ số | DNSE, dự phòng VCI |
+| BCTC kèm ngày công bố, chỉ số TTM, sự kiện doanh nghiệp, công bố thông tin | VCI |
+| Tin theo mã | CafeF (tin gắn mã), VCI (công bố), Google News tiếng Việt |
+| Báo cáo phân tích của CTCK | CafeF |
+| Khối ngoại mua/bán ròng, room, tự doanh từng mã; chứng chỉ quỹ ETF | VCI (lịch sử nhiều năm) |
+| Khối ngoại và tự doanh toàn thị trường | CafeF |
+| Độ rộng HOSE (mã tăng/giảm, trần/sàn, % trên MA50) | VNDirect |
+| Thành phần rổ VN30 | VCI |
+
+**Point-in-time:** một lượt chạy ngày D chỉ thấy các phiên đã đóng đến D, BCTC đã công bố đến D, và tin trước D. Dữ liệu dòng tiền được cache theo ngày; lịch sử dài được tải dần trong đêm. Nguồn nào lỗi thì coi như không có tín hiệu từ nguồn đó, quyết định vẫn được đưa ra.
+
+Mã nhận các dạng `FPT`, `fpt`, `FPT.VN`, `HOSE:FPT`. Chỉ số (`VNINDEX`, `VN30`...) chỉ dùng làm bối cảnh, không có quyết định giao dịch.
+
+---
+
+## Sử dụng
+
+### Telegram
+
+| Lệnh | Việc |
+|---|---|
+| `/phantich FPT [YYYY-MM-DD]` | Phân tích đầy đủ bằng các agent (vài phút): quyết định hệ thống tới trước, báo cáo + file HTML tới sau |
+| `/nhanh FPT` | Chỉ quyết định của Quant Engine (vài giây, không tốn quota AI) |
+| `/theodoi FPT,HPG,VCB` / `/theodoi` | Đặt / xem watchlist |
+| `/danhmuc` | Danh mục hai tài khoản ảo (và tài khoản thật ở chế độ `signal`) |
+| `/lenh` | Lệnh bot đặt cho phiên tới |
+| `/hieuchinh` | Ngưỡng đang dùng và kết quả tự hiệu chỉnh gần đây |
+| `/chay` | Chạy ngay phiên giao dịch đã đóng gần nhất cho bot (bỏ qua nếu phiên đó đã chạy) |
+| `/von 500000000` | Đặt tiền mặt tài khoản thật (chế độ `signal`) |
+| `/khop mua FPT 100 56300` | Báo đã khớp lệnh thật; bán: `/khop ban ...` |
+| `/trangthai` | Hàng đợi và trạng thái nhà cung cấp AI |
+| `/id` | Telegram id của bạn |
+
+### Trang web
+
+- **Trang chính:** nhập mã, chọn phân tích đầy đủ hoặc chỉ quyết định hệ thống, xem hàng đợi, sửa watchlist, xem trạng thái nhà cung cấp AI.
+- **`/bot`:** biểu đồ NAV hai chiến lược so với VNINDEX, danh mục, lệnh và giao dịch của hai tài khoản ảo; ngưỡng đang dùng; lịch sử tự hiệu chỉnh. Nút **Chạy phiên ngay** làm như `/chay`.
+- **Giao diện sáng / tối:** theo cài đặt của thiết bị, đổi bằng nút mặt trời/mặt trăng trên thanh đầu trang (trình duyệt nhớ lựa chọn). Tông màu trà đào - cam - sả, dùng tốt trên điện thoại.
+- **`/jobs/<id>`, `/reports/<id>`:** tiến trình và báo cáo HTML của từng lượt phân tích.
+
+### Bảo mật và quota
+
+- Trang web bắt buộc mật khẩu (`WEB_PASSWORD`), chặn form gửi từ trang khác, không cho nhúng iframe.
+- Bot Telegram chỉ phục vụ id trong `TELEGRAM_ALLOWED_IDS`.
+- Yêu cầu trùng mã + ngày được gộp; tối đa `MAX_PENDING` lượt chờ.
+- Chuỗi AI dự phòng: 9Router → Groq → OpenRouter → Grok. Nhà cung cấp lỗi được bỏ qua; bị 429 thì cho nghỉ.
+
+---
+
+## Chạy trên máy cá nhân, Docker, thư viện Python
+
+### Cài đặt
+
 ```bash
-pip install .
+git clone https://github.com/traique/trading_vn.git
+cd trading_vn
+python -m venv .venv && source .venv/bin/activate     # Python 3.11+
+pip install ".[bot]"                                  # bỏ [bot] nếu chỉ dùng CLI/thư viện
+cp .env.example .env                                  # key AI cho CLI
 ```
 
-### Docker
+**Docker:**
+- CLI: `docker compose run --rm tradingagents`
+- Bot luôn bật: `docker compose --profile bot up -d bot`, dùng `.env` theo mẫu `deploy/botkeep/.env.example`.
 
-Alternatively, run with Docker:
-```bash
-cp .env.example .env  # add your API keys
-docker compose run --rm tradingagents
-```
+### Nhà cung cấp AI
 
-After updating the repository, rebuild the image with `docker compose build`.
+**Key cho CLI và thư viện:** OpenAI, Anthropic, Google, xAI, DeepSeek, Qwen, GLM, MiniMax, OpenRouter, Mistral, Kimi, Groq, NVIDIA.
 
-Results, reports, the memory log and the cache live in the `tradingagents_data` volume. To keep them in a folder on the host instead, create the folder and point `TRADINGAGENTS_DATA_DIR` at it, in `.env` or the shell: `mkdir -p data && TRADINGAGENTS_DATA_DIR=./data docker compose run --rm tradingagents`.
+**Các nhà cung cấp khác:**
+- Azure OpenAI: dùng `.env.enterprise.example`.
+- AWS Bedrock: `pip install ".[bedrock]"`.
+- Ollama.
+- Mọi endpoint tương thích OpenAI: `llm_provider: "openai_compatible"`.
+- Chuỗi dự phòng của bot: `llm_provider: "router9_chain"`.
 
-For local models with Ollama:
-```bash
-docker compose --profile ollama run --rm tradingagents-ollama
-```
-
-### Required APIs
-
-TradingAgents supports multiple LLM providers. Set the API key for your chosen provider:
+### CLI
 
 ```bash
-export OPENAI_API_KEY=...          # OpenAI (GPT)
-export GOOGLE_API_KEY=...          # Google (Gemini)
-export ANTHROPIC_API_KEY=...       # Anthropic (Claude)
-export XAI_API_KEY=...             # xAI (Grok)
-export DEEPSEEK_API_KEY=...        # DeepSeek
-export DASHSCOPE_API_KEY=...       # Qwen (international, dashscope-intl.aliyuncs.com)
-export DASHSCOPE_CN_API_KEY=...    # Qwen (China, dashscope.aliyuncs.com)
-export ZHIPU_API_KEY=...           # GLM via Z.AI (international)
-export ZHIPU_CN_API_KEY=...        # GLM via BigModel (China, open.bigmodel.cn)
-export MINIMAX_API_KEY=...         # MiniMax (global, api.minimax.io)
-export MINIMAX_CN_API_KEY=...      # MiniMax (China, api.minimaxi.com)
-export OPENROUTER_API_KEY=...      # OpenRouter
-export MISTRAL_API_KEY=...         # Mistral
-export MOONSHOT_API_KEY=...        # Kimi (Moonshot)
-export GROQ_API_KEY=...            # Groq
-export NVIDIA_API_KEY=...          # NVIDIA NIM
-```
-
-Market data (DNSE, VCI, CafeF, Google News) needs no key.
-
-For Azure OpenAI, copy `.env.enterprise.example` to `.env.enterprise` and fill in your credentials.
-
-For AWS Bedrock, install the extra with `pip install ".[bedrock]"`, set `llm_provider: "bedrock"`, configure AWS credentials (environment variables, `~/.aws/credentials`, or an IAM role) and `AWS_DEFAULT_REGION`, and use a Bedrock model ID, e.g. `us.anthropic.claude-opus-5-5`.
-
-For local models, configure Ollama with `llm_provider: "ollama"`. The default endpoint is `http://localhost:11434/v1`; set `OLLAMA_BASE_URL` to point at a remote `ollama-serve`. Pull models with `ollama pull <name>`, and pick "Custom model ID" in the CLI for any model not listed by default.
-
-For any other OpenAI-compatible server (vLLM, LM Studio, llama.cpp, or a custom relay), use `llm_provider: "openai_compatible"` and set the endpoint via `backend_url` (or `TRADINGAGENTS_LLM_BACKEND_URL`), e.g. `http://localhost:8000/v1` for vLLM or `http://localhost:1234/v1` for LM Studio. The model is whatever your server serves. No key is needed for local servers; set `OPENAI_COMPATIBLE_API_KEY` when the endpoint requires one.
-
-Alternatively, copy `.env.example` to `.env` and fill in your keys:
-```bash
-cp .env.example .env
-```
-
-### CLI Usage
-
-Launch the interactive CLI:
-```bash
-tradingagents          # installed command
-python -m cli.main     # alternative: run directly from source
-```
-You will see a screen where you can select your desired tickers, analysis date, LLM provider, research depth, and more. Your previous run's answers come back as the defaults, so pressing Enter accepts them. The `TRADINGAGENTS_*` variables in `.env` still skip their step entirely.
-
-To run without questions, for a scheduled job or a script, answer the per-run steps with flags and the rest with `TRADINGAGENTS_*` variables:
-```bash
-export TRADINGAGENTS_LLM_PROVIDER=openai TRADINGAGENTS_QUICK_THINK_LLM=gpt-6-luna TRADINGAGENTS_DEEP_THINK_LLM=gpt-6-sol
-export TRADINGAGENTS_OUTPUT_LANGUAGE=Vietnamese TRADINGAGENTS_MAX_DEBATE_ROUNDS=1 TRADINGAGENTS_MAX_RISK_ROUNDS=1
+tradingagents                                     # giao diện hỏi từng bước
 tradingagents --ticker FPT --date 2026-10-13 --analysts market,news,fundamentals --save --no-show
 ```
-Each flag skips only its own question. Run without a terminal, a missing answer stops the run before it starts and names the flag or variable to set.
 
-A saved report also includes `complete_report.html`, the report as one page with its sections listed beside the text, for reading in a browser, on a phone or in print. Answering the save question at the prompt also asks about the page and can open it in your browser; `--no-html` skips it, and so does `ta.save_reports(state, "FPT", html=False)` from Python.
-
-### Markets and tickers
-
-Any stock listed on HOSE, HNX or UPCoM, by its code. These all name the same stock: `FPT`, `fpt`, `FPT.VN`, `HOSE:FPT`. The exchange, company name and sector are resolved from the VCI listing; the alpha benchmark is VNINDEX. Indices (`VNINDEX`, `VN30`, `HNX`, `HNX30`, `UPCOM`) are served as market context, but an index has no trading decision of its own.
-
-<p align="center">
-  <img src="assets/cli/cli_init.png" width="100%" style="display: inline-block; margin: 0 2%;">
-</p>
-
-An interface will appear showing results as they load, letting you track the agent's progress as it runs.
-
-<p align="center">
-  <img src="assets/cli/cli_news.png" width="100%" style="display: inline-block; margin: 0 2%;">
-</p>
-
-<p align="center">
-  <img src="assets/cli/cli_transaction.png" width="100%" style="display: inline-block; margin: 0 2%;">
-</p>
-
-## TradingAgents Package
-
-### Implementation Details
-
-We built TradingAgents with LangGraph to ensure flexibility and modularity. The framework supports multiple LLM providers: OpenAI, Google, Anthropic, xAI, DeepSeek, Qwen (Alibaba DashScope, international and China endpoints), GLM (Zhipu), MiniMax (global + China), OpenRouter, Ollama for local models, and Azure OpenAI for enterprise.
-
-### Python Usage
-
-To use TradingAgents inside your code, you can import the `tradingagents` module and initialize a `TradingAgentsGraph()` object. The `.propagate()` function will return a decision. You can run `main.py`, here's also a quick example:
+### Thư viện Python
 
 ```python
 from tradingagents.graph.trading_graph import TradingAgentsGraph
 from tradingagents.default_config import DEFAULT_CONFIG
+from tradingagents.quant import engine
 
-ta = TradingAgentsGraph(debug=True, config=DEFAULT_CONFIG.copy())
+print(engine.analyze("FPT", "2026-10-13").deterministic_summary)   # chỉ Quant Engine, không gọi AI
 
-# forward propagate
-state, decision = ta.propagate("FPT", "2026-10-13")
-print(decision)
-
-# the same report tree the CLI saves, under results_dir/reports
+config = DEFAULT_CONFIG.copy()
+config["llm_provider"] = "openai"
+ta = TradingAgentsGraph(config=config)
+state, action = ta.propagate("FPT", "2026-10-13")                # BUY / HOLD / WATCH / SELL / NO_TRADE
 ta.save_reports(state, "FPT")
 ```
 
-You can also adjust the default configuration to set your own choice of LLMs, debate rounds, etc.
+Backtest hai chiến lược của bot trên dữ liệu lịch sử:
 
 ```python
-from tradingagents.graph.trading_graph import TradingAgentsGraph
-from tradingagents.default_config import DEFAULT_CONFIG
+from tradingagents.dataflows import money_flows as mf
+from tradingagents.quant.params import DEFAULT
+from tradingagents.trading import momentum, simulator as sim
 
-config = DEFAULT_CONFIG.copy()
-config["llm_provider"] = "openai"        # e.g. openai, google, anthropic, deepseek, groq, ollama; openai_compatible covers any OpenAI-compatible endpoint (vLLM, LM Studio, llama.cpp, ...)
-config["deep_think_llm"] = "gpt-6-sol"    # Model for complex reasoning
-config["quick_think_llm"] = "gpt-6-luna"   # Model for quick tasks
-config["max_debate_rounds"] = 2
-
-ta = TradingAgentsGraph(debug=True, config=config)
-_, decision = ta.propagate("FPT", "2026-10-13")
-print(decision)
+data = sim.build_dataset(mf.index_members("VN30"), 460, "2026-10-13")
+print(sim.score(sim.run(data, DEFAULT)).line())        # Quant Engine
+print(sim.score(momentum.run(data, DEFAULT)).line())   # Động lượng
 ```
 
-The quick model serves the analysts, researchers, debaters and trader; the deep model serves the research and portfolio managers. Each can run on its own provider, for example the managers on Claude while the rest run on OpenAI:
+**Danh mục đang nắm giữ:** truyền `PortfolioContext` vào `propagate(..., portfolio=...)` hoặc dùng `tradingagents --portfolio book.json`. Khi đó tín hiệu xấu với mã đang giữ sẽ thành `SELL`/`HOLD`, và có tiền mặt thì khối lượng được tính theo lô 100.
 
-```python
-config["deep_think_provider"] = "anthropic"
-config["deep_think_llm"] = "claude-opus-5-5"
+---
+
+## Bộ nhớ, checkpoint và backtest
+
+- **Memory log:** mỗi lượt phân tích AI ghi quyết định lại. Khi hết thời gian nắm giữ, quyết định được chấm theo alpha so với VNINDEX, và Portfolio Manager ở các lượt sau đọc lại bài học.
+- **Checkpoint** (`--checkpoint`): chạy tiếp từ bước cuối khi bị ngắt. Bản Botkeep tắt tính năng này để tiết kiệm ổ đĩa.
+- **Backtest bằng agent AI** trên lưới mã × ngày: `tradingagents backtest FPT,HPG --start 2026-06-01 --end 2026-08-01 --every 7`.
+
+---
+
+## Cấu trúc mã nguồn
+
+```
+tradingagents/
+  quant/          Quant Engine: features, policy, params, flow_features, sector, validation, report_format
+  trading/        ledger (sổ lệnh luật VN), simulator, momentum, calibrate
+  agents/         analyst, researcher, trader, risk, manager, output_guard
+  dataflows/      DNSE, VCI, CafeF, VNDirect, Google News; cache giá và dòng tiền point-in-time
+  market/         vn_rules: biên độ, bước giá, lô, T+2, phiên, phí
+  graph/          LangGraph: đồ thị, analyst song song, checkpoint
+  llm_clients/    nhà cung cấp AI, chuỗi dự phòng
+  memory/         memory log, chấm điểm quyết định
+vnbot/            ứng dụng luôn bật: web, Telegram, bot giao dịch, hàng đợi, lịch hằng ngày
+cli/              CLI tương tác
+main_botkeep.py   điểm khởi động ứng dụng luôn bật
+deploy/botkeep/   requirements, .env.example, hướng dẫn Botkeep
+scripts/          build_botkeep_bundle.py (gói upload Botkeep)
+tests/            ~1200 test, không cần mạng hay key
 ```
 
-A tier on its own provider uses that provider's key and default endpoint; set `quick_think_backend_url` or `deep_think_backend_url` for a local or relay endpoint. The `TRADINGAGENTS_DEEP_THINK_PROVIDER` and `TRADINGAGENTS_QUICK_THINK_PROVIDER` variables set them for the CLI, together with the tier's model variable.
-
-See `tradingagents/default_config.py` for all configuration options.
-
-### Fundamentals as published
-
-Statements, ratios and corporate events come from VCI, which records the date each quarterly and annual statement was published. A run dated in the past reads only the statements public by that day; a statement VCI holds without a publication date is treated as published at the legal deadline (45 days after quarter end, 90 days after year end). TTM ratios (P/E, P/B, ROE, ...) follow their quarter. Banks, securities firms, insurers and real-estate developers are valued on P/B against their sector, other companies on P/E.
-
-Insider and major-shareholder deals are served as the registrations and results disclosed by the run date. Foreign ownership, the current profile and analysts' target prices exist only as of today, so a past run is told they are withheld.
-
-### Current holdings
-
-By default the agents do not know what you hold, so their guidance is written for a reader who applies it to their own position. Pass a portfolio to have the quant engine and the decision agents work against your actual book: a holding turns a bearish read into SELL (exit) or HOLD instead of NO_TRADE, and with cash given the position size is also stated in board lots of 100 shares.
-
-```python
-from tradingagents.portfolio import PortfolioContext
-
-portfolio = PortfolioContext.model_validate({
-    "cash": 500_000_000,
-    "currency": "VND",
-    "positions": [{"ticker": "FPT", "quantity": 1000, "average_price": 62_000}],
-})
-_, decision = ta.propagate("FPT", "2026-10-13", portfolio=portfolio)
-```
-
-The CLI takes the same content as a JSON file: `tradingagents --portfolio my_book.json`.
-
-An empty `positions` list means a flat book, which is different from passing nothing. A run without a portfolio is never treated as flat.
-
-## Persistence and Recovery
-
-TradingAgents persists two kinds of state across runs.
-
-### Memory log
-
-The memory log is always on. Each completed run appends its decision to `~/.tradingagents/memory/trading_memory.md`. While the analysts of a later run work, TradingAgents settles every logged decision whose holding period has passed: it fetches the realised return (raw, and alpha against the instrument's regional benchmark) and generates a one-paragraph reflection. The Portfolio Manager then reads the most recent decisions for the same ticker plus recent lessons from other tickers, so each analysis carries forward what worked and what didn't. If settling fails, the run goes on and its report says so.
-
-Override the path with `TRADINGAGENTS_MEMORY_LOG_PATH`.
-
-To settle decisions without running an analysis, for a scheduled job, call `ta.settle_all_pending()`; it returns the decisions it settled and any it could not.
-
-### Checkpoint resume
-
-Checkpoint resume is opt-in via `--checkpoint`. When enabled, LangGraph saves state after each node so a crashed or interrupted run resumes from the last successful step instead of starting over. The run view says whether it resumed a saved run or started fresh. Checkpoints are cleared automatically on successful completion.
-
-Per-ticker SQLite databases live at `~/.tradingagents/cache/checkpoints/<TICKER>.db` (override the base with `TRADINGAGENTS_CACHE_DIR`). Use `--clear-checkpoints` to reset all of them before a run.
+## Phát triển và kiểm thử
 
 ```bash
-tradingagents --checkpoint           # enable for this run
-tradingagents --clear-checkpoints    # reset before running
+pip install -e ".[dev]"
+pytest -q
+ruff check .
 ```
 
-```python
-config = DEFAULT_CONFIG.copy()
-config["checkpoint_enabled"] = True
-ta = TradingAgentsGraph(config=config)
-_, decision = ta.propagate("FPT", "2026-10-13")
-```
+Test không gọi mạng hay AI: dữ liệu và model đều được giả lập. CI chạy trên Python 3.11–3.14. Lịch sử thay đổi xem ở [CHANGELOG.md](CHANGELOG.md).
 
-## Evaluating decisions over time
+## Giới hạn cần biết
 
-One run gives one decision, which cannot tell you whether the system decides well. `run_backtest` runs the same pipeline over a grid of tickers and dates, writes to a memory log of its own, and scores the decisions whose holding window has since traded.
+- **Nguồn dữ liệu không chính thức:** các endpoint DNSE/VCI/CafeF/VNDirect là API công khai mà website của họ dùng, không phải API có cam kết. Chúng có thể đổi hoặc chặn IP nước ngoài.
+- **Backtest có thể đẹp hơn thực tế:**
+  - giá đã điều chỉnh quyền tính đến hôm nay;
+  - rổ VN30 lấy theo danh sách hiện tại, nên bỏ sót những mã từng bị loại (thiên lệch sống sót);
+  - không phát lại tin tức.
+- **Rủi ro của chiến lược động lượng:** có thể sụt giảm 20–25%, và thua VNINDEX khi thị trường tăng mạnh.
+- **Tự hiệu chỉnh có giới hạn:** chỉ chỉnh ngưỡng của chiến lược có sẵn, không tạo ra lợi thế mới.
 
-```python
-from tradingagents.backtest import iter_grid, run_backtest, summarize
+## Ghi công
 
-dates = iter_grid("2026-06-01", "2026-08-01", every_n_days=7)
-result = run_backtest(["FPT", "HPG"], dates, config, selected_analysts=["market", "news"])
-print(summarize(result).render())
-```
-
-From the CLI:
-
-```bash
-tradingagents backtest FPT,HPG --start 2026-06-01 --end 2026-08-01 --every 7
-```
-
-Each cell is scored on realized alpha against the instrument's regional benchmark, grouped by rating. Your own memory log is never written to, and re-running the same grid with `run_id=result.run_id` skips the cells that already ran, so an interrupted sweep continues where it stopped.
-
-## Reproducibility
-
-TradingAgents is LLM-driven, so two runs of the same ticker and date can differ. This is expected for a research tool built on language models, not a defect. The variation comes from a few distinct sources, and it helps to separate them.
-
-Language model sampling is non-deterministic. Even at a fixed temperature, providers do not guarantee byte-identical output across calls, and reasoning models (the default GPT-6 family, and any thinking-mode model) vary the most because their internal reasoning is itself sampled.
-
-Live data moves. Google News search results change as time passes, so a run today can see different headlines than a run last week even for the same historical trade date. Pin the analysis date to hold the price window, the statements and the system decision fixed: the quant engine is deterministic for a given date and price history. Prices are adjusted by the source for corporate actions as of today, so absolute levels of a past date can differ from the prices traded then by the adjustment factor; returns and indicators are unaffected.
-
-To reduce variation you can lower the sampling temperature. Set `temperature` in your config (or `TRADINGAGENTS_TEMPERATURE` in `.env`); lower values make models that honor it more repeatable. The current curated models are reasoning-first and largely ignore temperature, so for tighter reproducibility name a non-reasoning model in your config, or in `TRADINGAGENTS_DEEP_THINK_LLM` and `TRADINGAGENTS_QUICK_THINK_LLM`. Any model ID your provider serves is accepted, whether or not the picker lists it.
-
-```python
-config = DEFAULT_CONFIG.copy()
-config["llm_provider"] = "openai"
-config["temperature"] = 0.0
-# Reasoning models ignore temperature. For tighter reproducibility, name a
-# non-reasoning model in deep_think_llm / quick_think_llm.
-```
-
-What does not vary anymore: the analyzed company identity is resolved deterministically from the ticker before any agent runs, and the market analyst grounds exact price and indicator claims in a verified data snapshot. Earlier reports of "different companies" or fabricated price levels across runs are addressed by these two mechanisms.
-
-Backtest results are not guaranteed to match any published figure. Returns depend on the model, the temperature, the date range, data quality, and the sampling above. Treat the framework as a research scaffold for studying multi-agent analysis, not as a strategy with a fixed, replicable return.
-
-## Contributing
-
-Contributions are welcome: bug fixes, documentation, and feature ideas; past contributions are credited per release in [`CHANGELOG.md`](CHANGELOG.md).
-
-## Citation
-
-Please reference our work if you find *TradingAgents* provides you with some help :)
+Dựa trên **TradingAgents** của Tauric Research ([mã nguồn gốc](https://github.com/TauricResearch/TradingAgents)), giấy phép Apache 2.0 (xem [LICENSE](LICENSE)). Quant Engine và Output Guard được port từ lớp policy của dự án lananh-main.
 
 ```
 @misc{xiao2025tradingagentsmultiagentsllmfinancial,
-      title={TradingAgents: Multi-Agents LLM Financial Trading Framework}, 
+      title={TradingAgents: Multi-Agents LLM Financial Trading Framework},
       author={Yijia Xiao and Edward Sun and Di Luo and Wei Wang},
       year={2025},
       eprint={2412.20138},
       archivePrefix={arXiv},
       primaryClass={q-fin.TR},
-      url={https://arxiv.org/abs/2412.20138}, 
+      url={https://arxiv.org/abs/2412.20138},
 }
 ```

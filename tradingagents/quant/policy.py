@@ -22,6 +22,8 @@ from dataclasses import dataclass, field
 
 from tradingagents.market import vn_rules
 from tradingagents.quant import features as feat
+from tradingagents.quant.flow_features import MarketFlows, StockFlows, fmt_bn
+from tradingagents.quant.params import DEFAULT as DEFAULT_PARAMS, Params
 from tradingagents.quant.validation import DataQuality
 
 CONFIDENCE_BUY_MIN = 0.75
@@ -84,6 +86,7 @@ def build_trade_plan(
     key_levels: feat.KeyLevels | None,
     liquidity: feat.Liquidity | None,
     exchange: str | None = None,
+    params: Params = DEFAULT_PARAMS,
 ) -> TradePlan | None:
     """B2 - suy ngược tỷ trọng vị thế từ khoảng cách rủi ro (không bịa số
     NAV thật - đây là % NAV ĐỀ XUẤT dựa trên nguyên tắc rủi ro cố định mỗi
@@ -109,11 +112,11 @@ def build_trade_plan(
     if risk_pct <= 0:
         return None
 
-    size = RISK_PER_TRADE_PCT / risk_pct * 100
-    size *= 0.6 + 0.4 * feat.clamp((confidence - CONFIDENCE_BUY_MIN) / 0.25, 0, 1)
+    size = params.risk_per_trade_pct / risk_pct * 100
+    size *= 0.6 + 0.4 * feat.clamp((confidence - params.confidence_buy_min) / 0.25, 0, 1)
     if liquidity and liquidity.is_thin:
         size *= 0.5
-    size = round(feat.clamp(size, MIN_POSITION_PCT, MAX_POSITION_PCT), 1)
+    size = round(feat.clamp(size, MIN_POSITION_PCT, params.max_position_pct), 1)
 
     resistances = key_levels.resistances if key_levels else []
     target1 = target_price
@@ -203,12 +206,23 @@ class PolicyInputs:
     # Donchian/SMA50/trend 3 tháng/hỗ trợ-kháng cự đều méo -> không được ra
     # tín hiệu định hướng (breakdown/SELL lẫn BUY) trên chuỗi này.
     unadjusted_gap: bool = False
+    # Money flows (None = not available: no signal either way).
+    stock_flows: StockFlows | None = None
+    market_flows: MarketFlows | None = None
+    # A VN30 member: ETF creations/redemptions move its price.
+    etf_member: bool = False
+    # Raw candidate distribution days of VNINDEX (features.distribution_events);
+    # None = not computed, then ``vnindex_distribution_days`` is used as given.
+    vnindex_dist_events: tuple | None = None
+    # The thresholds in force (see params.py); the defaults are the constants above.
+    params: Params = DEFAULT_PARAMS
 
 
 def classify_market_regime(
     vnindex_multi_tf: feat.MultiTimeframe | None,
     vnindex_adx: feat.ADXResult | None,
     distribution_days: int = 0,
+    threshold: int = DISTRIBUTION_DAY_THRESHOLD,
 ) -> str:
     """Gate A - risk_on/neutral/risk_off dựa trên xu hướng VNINDEX.
 
@@ -220,7 +234,7 @@ def classify_market_regime(
     trước vì nó có thể phát hiện phân phối ngầm TRƯỚC KHI xu hướng giá kịp
     quay đầu rõ ràng (alignment vẫn có thể chưa "bearish" khi distribution
     days đã chạm ngưỡng)."""
-    if distribution_days >= DISTRIBUTION_DAY_THRESHOLD:
+    if distribution_days >= threshold:
         return "risk_off"
     if vnindex_multi_tf is None:
         return "unknown"
@@ -414,11 +428,85 @@ def _detect_setup(
     return "none", 0.35, reasons
 
 
+_REGIME_DOWN = {"risk_on": "neutral", "neutral": "risk_off"}
+
+
+def distribution_count(inputs: PolicyInputs) -> int:
+    """VNINDEX distribution days under the thresholds in force."""
+    events, p = inputs.vnindex_dist_events, inputs.params
+    if events is None:
+        return inputs.vnindex_distribution_days
+    return sum(
+        1 for change, rally in events
+        if change <= -p.dist_min_drop_pct and not (p.dist_expiry_rally_pct and rally >= p.dist_expiry_rally_pct)
+    )
+
+
+def _flow_regime(regime: str, inputs: PolicyInputs) -> tuple[str, list[str]]:
+    """Gate A, money-flow part: market-wide foreign selling or weak breadth lowers the regime a notch each."""
+    p, m = inputs.params, inputs.market_flows
+    reasons: list[str] = []
+    if m is None or regime not in _REGIME_DOWN:
+        return regime, reasons
+    if (
+        m.foreign_sell_days_15 is not None
+        and m.foreign_sell_days_15 >= p.market_foreign_sell_days
+        and (m.foreign_net_20 or 0) < 0
+    ):
+        regime = _REGIME_DOWN.get(regime, regime)
+        reasons.append(
+            f"khối ngoại bán ròng toàn thị trường {m.foreign_sell_days_15}/15 phiên "
+            f"({fmt_bn(m.foreign_net_20)} trong 20 phiên) - hạ regime một bậc"
+        )
+    if p.breadth_divergence_on and m.breadth_divergence and regime in _REGIME_DOWN:
+        regime = _REGIME_DOWN[regime]
+        reasons.append(
+            "VNINDEX lên đỉnh 20 phiên nhưng độ rộng suy yếu"
+            + (f" (% mã trên MA50 {m.pct_above_ma50:.0f}%)" if m.pct_above_ma50 is not None else "")
+            + " - phân kỳ, hạ regime một bậc"
+        )
+    return regime, reasons
+
+
+def _flow_score(inputs: PolicyInputs) -> tuple[float, list[str]]:
+    """Money flow into the stock, -1.5..+1.5 (positive = buying), and why."""
+    p, f, m = inputs.params, inputs.stock_flows, inputs.market_flows
+    score, reasons = 0.0, []
+    if f is not None:
+        ratio = f.foreign_ratio_20
+        room_full = f.room_pct is not None and f.room_pct < 1.0
+        foreign = 0.0
+        if room_full:
+            reasons.append(f"room khối ngoại gần hết ({f.room_pct:.2f}%) - bỏ qua tín hiệu mua của khối ngoại")
+        elif ratio is not None and ratio >= p.foreign_ratio_min and f.foreign_streak >= p.foreign_streak_min:
+            foreign = 1.0
+            reasons.append(
+                f"khối ngoại mua ròng {f.foreign_streak} phiên liên tiếp, 20 phiên {fmt_bn(f.foreign_net_20)} "
+                f"({ratio:+.1f}% giá trị khớp)"
+            )
+        if ratio is not None and ratio <= -p.foreign_ratio_min and f.foreign_sell_days_10 >= 7:
+            foreign = -1.0
+            reasons.append(
+                f"khối ngoại bán ròng {f.foreign_sell_days_10}/10 phiên, 20 phiên {fmt_bn(f.foreign_net_20)} "
+                f"({ratio:+.1f}% giá trị khớp)"
+            )
+        score += foreign
+        prop = f.prop_ratio_10
+        if foreign and prop is not None and abs(prop) >= p.prop_ratio_min and (prop > 0) == (foreign > 0):
+            score += 0.5 * foreign
+            reasons.append(f"tự doanh cùng chiều ({prop:+.1f}% giá trị khớp 10 phiên)")
+    if inputs.etf_member and m is not None and m.etf_net_20:
+        score += 0.25 if m.etf_net_20 > 0 else -0.25
+        reasons.append(f"dòng tiền ETF 20 phiên {fmt_bn(m.etf_net_20)} (mã thuộc rổ VN30)")
+    return score, reasons
+
+
 def _compute_confidence(
     inputs: PolicyInputs,
     bias: _Bias,
     setup_strength: float,
     regime: str,
+    flow_score: float = 0.0,
 ) -> float:
     """Confidence có nghĩa vận hành (xem CONFIDENCE_*_MIN), không phải số
     trang trí. Blend setup quality + đồng thuận tín hiệu + trend score,
@@ -451,7 +539,31 @@ def _compute_confidence(
     if inputs.liquidity and inputs.liquidity.is_thin:
         confidence *= 0.85
 
+    # Money flow: buying lifts a bullish read and weakens a bearish one, and vice versa.
+    if bias.direction == "bullish":
+        confidence += inputs.params.flow_weight * flow_score
+    elif bias.direction == "bearish":
+        confidence -= inputs.params.flow_weight * flow_score
+
     return round(feat.clamp(confidence, 0.0, 1.0), 2)
+
+
+def _resistances(
+    price: float,
+    support_resistance: feat.SupportResistance | None,
+    key_levels: feat.KeyLevels | None,
+) -> list[float]:
+    """Every real resistance above the price, nearest first."""
+    candidates: list[float] = []
+    if support_resistance is not None:
+        level = support_resistance.resistance_prior
+        if level is None:
+            level = support_resistance.resistance
+        if level is not None and level > price:
+            candidates.append(level)
+    if key_levels is not None:
+        candidates.extend(lv.price for lv in key_levels.resistances if lv.price > price)
+    return sorted(set(candidates))
 
 
 def _nearest_resistance(
@@ -501,6 +613,7 @@ def _compute_stop_target(
     support_resistance: feat.SupportResistance | None,
     exchange: str | None = None,
     key_levels: feat.KeyLevels | None = None,
+    params: Params = DEFAULT_PARAMS,
 ) -> tuple[float | None, float | None, float | None, str]:
     """Gate D input - stop ưu tiên ATR thật/hỗ trợ thật; chỉ rơi về % biến
     động lịch sử khi không có H/L thật để tính ATR.
@@ -558,6 +671,13 @@ def _compute_stop_target(
             return None, None, None, basis
 
         resistance = _nearest_resistance(price, support_resistance, key_levels)
+        if resistance is not None and params.skip_near_resistance:
+            # A nearer level that leaves too little room is expected to be
+            # tested, not to cap the move: aim at the first one that pays.
+            for level in _resistances(price, support_resistance, key_levels):
+                if (feat.round_order_price(level, exchange) - entry_high) / risk >= params.min_rr_ratio:
+                    resistance = level
+                    break
         if resistance is not None:
             target = feat.round_order_price(resistance, exchange)
             basis = f"{basis}+resistance"
@@ -656,6 +776,7 @@ def _build_scenarios(plan: TradePlan) -> list[Scenario]:
 
 def evaluate_policy(inputs: PolicyInputs) -> Decision:
     quality = inputs.quality
+    p = inputs.params
 
     if not quality.usable or inputs.price <= 0:
         return Decision(
@@ -672,9 +793,11 @@ def evaluate_policy(inputs: PolicyInputs) -> Decision:
             data_quality=quality.status,
         )
 
+    dist_days = distribution_count(inputs)
     regime = classify_market_regime(
-        inputs.vnindex_multi_tf, inputs.vnindex_adx, inputs.vnindex_distribution_days
+        inputs.vnindex_multi_tf, inputs.vnindex_adx, dist_days, p.distribution_day_threshold,
     )
+    regime, flow_regime_reasons = _flow_regime(regime, inputs)
     holding = inputs.is_holding
 
     if inputs.unadjusted_gap:
@@ -706,18 +829,21 @@ def evaluate_policy(inputs: PolicyInputs) -> Decision:
     session_flags = _evaluate_session(inputs.session, inputs.enhanced)
     bias = _classify_bias(inputs)
     setup_type, setup_strength, setup_reasons = _detect_setup(inputs, bias, session_flags)
-    confidence = _compute_confidence(inputs, bias, setup_strength, regime)
+    flow_score, flow_reasons = _flow_score(inputs)
+    confidence = _compute_confidence(inputs, bias, setup_strength, regime, flow_score)
     risk_level = _risk_level(inputs, session_flags)
 
     reasons: list[str] = []
     if quality.status == "degraded":
         reasons.extend(quality.reasons)
-    if inputs.vnindex_distribution_days >= DISTRIBUTION_DAY_THRESHOLD:
+    reasons.extend(flow_regime_reasons)
+    if dist_days >= p.distribution_day_threshold:
         reasons.append(
-            f"VNINDEX có {inputs.vnindex_distribution_days} ngày phân phối trong 25 phiên gần nhất - dấu hiệu tổ chức lớn bán ra, ép thị trường chung về risk-off"
+            f"VNINDEX có {dist_days} ngày phân phối trong 25 phiên gần nhất - dấu hiệu tổ chức lớn bán ra, ép thị trường chung về risk-off"
         )
     reasons.extend(setup_reasons)
     reasons.extend(session_flags.reasons)
+    reasons.extend(flow_reasons)
 
     action = "NO_TRADE"
     direction = "watch"
@@ -730,14 +856,14 @@ def evaluate_policy(inputs: PolicyInputs) -> Decision:
         # Dữ liệu CŨ (stale) cũng chặn: giá/chỉ báo của nhiều ngày trước không
         # phải cơ sở để đặt vùng mua hôm nay.
         can_buy = (
-            confidence >= CONFIDENCE_BUY_MIN
+            confidence >= p.confidence_buy_min
             and regime in ("risk_on", "neutral")
             and not session_flags.hard_no_buy
             and not quality.is_stale
         )
         if can_buy:
             direction = "buy"  # BUY (mới) hay HOLD (đang giữ) chốt sau Gate D bên dưới
-        elif confidence >= CONFIDENCE_WATCH_MIN:
+        elif confidence >= p.confidence_watch_min:
             action = "HOLD" if holding else "WATCH"
             if regime == "risk_off":
                 reasons.append(
@@ -760,13 +886,13 @@ def evaluate_policy(inputs: PolicyInputs) -> Decision:
         # SELL chỉ có ý nghĩa khi đang thật sự giữ mã - không giữ thì
         # "SELL" là khuyến nghị vô nghĩa (không có gì để bán); trường hợp đó
         # tín hiệu giảm chỉ có tác dụng "đừng mua mới" (NO_TRADE).
-        if confidence >= CONFIDENCE_BUY_MIN:
+        if confidence >= p.confidence_buy_min:
             if holding:
                 action, direction = "SELL", "exit"
             else:
                 action = "NO_TRADE"
                 reasons.append("tín hiệu giảm rõ - không phải cơ hội mua mới")
-        elif confidence >= CONFIDENCE_WATCH_MIN:
+        elif confidence >= p.confidence_watch_min:
             if holding:
                 action, direction = "WATCH", "exit"
                 reasons.append(
@@ -780,7 +906,7 @@ def evaluate_policy(inputs: PolicyInputs) -> Decision:
             reasons.append("confidence chưa đủ cao để khẳng định tín hiệu giảm")
     elif bias.direction == "conflict":
         reasons.append("tín hiệu tăng/giảm mâu thuẫn nhau - chưa đủ rõ ràng để hành động")
-        if confidence >= CONFIDENCE_WATCH_MIN:
+        if confidence >= p.confidence_watch_min:
             action = "HOLD" if holding else "WATCH"
         else:
             action = "HOLD" if holding else "NO_TRADE"
@@ -803,11 +929,31 @@ def evaluate_policy(inputs: PolicyInputs) -> Decision:
             inputs.support_resistance,
             inputs.exchange,
             inputs.key_levels,
+            p,
         )
         if stop_price is None or rr_ratio is None:
             action = "HOLD" if holding else "WATCH"
             reasons.append("không tính được stop/target hợp lệ - không đề xuất vùng giá")
             invalidation_reason = None
+        elif "+resistance" not in basis and p.breakout_projected_ok and setup_type == "breakout":
+            # A breakout to new highs has no resistance above by definition:
+            # aim at a fixed multiple of the risk instead of refusing it.
+            entry_high = (entry_zone(inputs.price, stop_price, inputs.exchange) or (None, inputs.price))[1]
+            risk = entry_high - stop_price
+            target_price = feat.round_order_price(entry_high + risk * p.projected_rr, inputs.exchange)
+            rr_ratio = round((target_price - entry_high) / risk, 2) if risk > 0 else None
+            if rr_ratio is not None and rr_ratio >= p.min_rr_ratio:
+                action = "HOLD" if holding else "BUY"
+                buy_qualified = True
+                reasons.append(
+                    f"breakout lên vùng giá mới (không còn kháng cự phía trên) - mục tiêu {p.projected_rr:g}R"
+                )
+                invalidation_reason = (
+                    f"nếu giá đóng cửa dưới {stop_price:,.0f} coi như breakout thất bại, cần cắt lỗ"
+                ).replace(",", ".")
+            else:
+                action = "HOLD" if holding else "WATCH"
+                stop_price = target_price = rr_ratio = None
         elif "+resistance" not in basis:
             # Target suy ra từ reward_mult: R:R chỉ là chính hệ số đó (vòng
             # tròn) - không được tự nó mở BUY. Chỉ báo cáo là chưa đo được R:R.
@@ -819,13 +965,13 @@ def evaluate_policy(inputs: PolicyInputs) -> Decision:
             invalidation_reason = "chờ hình thành vùng kháng cự/hỗ trợ rõ để đo được R:R thật"
             # Không để target/R:R ước lượng lọt ra báo cáo như số thật.
             stop_price = target_price = rr_ratio = None
-        elif rr_ratio < MIN_RR_RATIO:
+        elif rr_ratio < p.min_rr_ratio:
             action = "HOLD" if holding else "WATCH"
             reasons.append(
-                f"risk/reward {rr_ratio} dưới ngưỡng tối thiểu {MIN_RR_RATIO} - "
+                f"risk/reward {rr_ratio} dưới ngưỡng tối thiểu {p.min_rr_ratio} - "
                 f"chưa {'mở thêm' if holding else 'vào mới'} dù setup ổn"
             )
-            invalidation_reason = f"chờ R:R cải thiện (hiện {rr_ratio}, cần >= {MIN_RR_RATIO})"
+            invalidation_reason = f"chờ R:R cải thiện (hiện {rr_ratio}, cần >= {p.min_rr_ratio})"
         else:
             action = "HOLD" if holding else "BUY"
             buy_qualified = True
@@ -844,6 +990,7 @@ def evaluate_policy(inputs: PolicyInputs) -> Decision:
             inputs.support_resistance,
             inputs.exchange,
             inputs.key_levels,
+            p,
         )
         if stop_price is None or rr_ratio is None:
             action = "HOLD" if holding else "WATCH"
@@ -871,7 +1018,7 @@ def evaluate_policy(inputs: PolicyInputs) -> Decision:
         and action in ("BUY", "HOLD")
         and stop_price is not None
         and rr_ratio is not None
-        and rr_ratio >= MIN_RR_RATIO
+        and rr_ratio >= p.min_rr_ratio
     ):
         trade_plan = build_trade_plan(
             inputs.price,
@@ -881,6 +1028,7 @@ def evaluate_policy(inputs: PolicyInputs) -> Decision:
             inputs.key_levels,
             inputs.liquidity,
             inputs.exchange,
+            p,
         )
         if trade_plan is not None:
             scenarios = _build_scenarios(trade_plan)

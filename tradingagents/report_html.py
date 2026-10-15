@@ -16,7 +16,8 @@ from tradingagents.agents.rating import run_rating
 from tradingagents.reporting import analyst_names
 
 # Ratings by direction, so the page can show which way the call leans.
-_TONE = {"Buy": "up", "Overweight": "up", "Hold": "level", "Underweight": "down", "Sell": "down"}
+_TONE = {"BUY": "up", "SELL": "down", "HOLD": "level", "WATCH": "level", "NO_TRADE": "level",
+         "Buy": "up", "Overweight": "up", "Hold": "level", "Underweight": "down", "Sell": "down"}
 
 # The Tauric Research logo as published (tauric.ai/brand/tauric-logo.svg), drawn
 # in the page so it loads nothing.
@@ -27,16 +28,17 @@ _PROJECT = f"{_ORG}/TradingAgents"
 
 _CSS = """
 :root {
-  --paper: #fbfbfa; --ink: #1c2126; --muted: #5d6670; --rule: #e2e5e8; --wash: #f2f4f5;
-  --accent: #087a59; --up: #087a59; --down: #b4372f; --level: #5d6670; --edge: #d3d8dc; --mark: #878f97;
+  /* "trà đào cam sả": peach tea and orange on cream, lemongrass for gains */
+  --paper: #faf5ef; --ink: #2a211b; --muted: #75665a; --rule: #eaddd0; --wash: #f6eee5;
+  --accent: #a44a1a; --up: #2e7d3a; --down: #b83a2e; --level: #75665a; --edge: #dccab8; --mark: #9a8b80;
   --serif: Charter, "Bitstream Charter", "Sitka Text", Cambria, Georgia, serif;
   --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   color-scheme: light dark;
 }
 @media (prefers-color-scheme: dark) {
   :root {
-    --paper: #131a1f; --ink: #e4e8eb; --muted: #9aa6af; --rule: #263239; --wash: #1a242a;
-    --accent: #14c290; --up: #14c290; --down: #ef6f63; --level: #9aa6af; --edge: #3d4c55; --mark: #66737c;
+    --paper: #14100d; --ink: #f5ece3; --muted: #a08f82; --rule: #3a3029; --wash: #28211c;
+    --accent: #f2a47c; --up: #86c98a; --down: #f08f84; --level: #a08f82; --edge: #4a3d34; --mark: #7e6f64;
   }
 }
 @media (prefers-color-scheme: dark) {

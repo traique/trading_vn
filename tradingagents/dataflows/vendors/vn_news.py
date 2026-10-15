@@ -5,6 +5,9 @@
   today's. Items carry the publisher in ``<source>`` and a ``pubDate``.
 - CafeF ``BaoCaoPhanTich.ashx`` lists brokers' research notes on a ticker
   with the date each was published (``DateDeploy``, ASP.NET ``/Date(ms)/``).
+- CafeF ``Events_RelatedNews_New.aspx`` lists CafeF's own articles tagged to a
+  ticker, newest first, each with its time (``dd/mm/yyyy HH:MM``) - a plain
+  HTML fragment, no browser needed. Paged back to reach a past window.
 """
 
 from __future__ import annotations
@@ -19,6 +22,13 @@ from tradingagents.dataflows.vendors import http
 from tradingagents.market import vn_rules
 
 GOOGLE_NEWS_RSS = "https://news.google.com/rss/search"
+CAFEF_TICKER_NEWS = "https://cafef.vn/du-lieu/Ajax/Events_RelatedNews_New.aspx"
+_CAFEF_ROW = re.compile(
+    r'<span class="timeTitle">\s*(\d{2}/\d{2}/\d{4} \d{2}:\d{2})\s*</span>[\s\S]*?'
+    r'<a[^>]*href="([^"]+)"[^>]*title="([^"]+)"',
+    re.IGNORECASE,
+)
+CAFEF_MAX_PAGES = 6
 CAFEF_REPORTS = "https://cafef.vn/du-lieu/Ajax/PageNew/BaoCaoPhanTich.ashx"
 
 # Covered-warrant noise: a "CFPT2501" headline is about a warrant, not the stock.
@@ -117,5 +127,39 @@ def cafef_research(symbol: str, start_date: str, end_date: str, limit: int = 5) 
             summary=body[:600],
             confirmed=True,
         ))
+    items.sort(key=lambda h: h.published, reverse=True)
+    return items[:limit]
+
+
+def cafef_company_news(symbol: str, start_date: str, end_date: str, limit: int = 10) -> list[Headline]:
+    """CafeF articles tagged to ``symbol`` and published in the window, newest first."""
+    window_start = datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=vn_rules.VN_TZ)
+    window_end = (datetime.strptime(end_date, "%Y-%m-%d") + timedelta(days=1)).replace(tzinfo=vn_rules.VN_TZ)
+    items: list[Headline] = []
+    for page in range(1, CAFEF_MAX_PAGES + 1):
+        text = http.get_text(
+            CAFEF_TICKER_NEWS, vendor="CafeF", headers={"Referer": "https://cafef.vn/"},
+            params={"symbol": symbol, "floorID": 0, "configID": 0, "PageIndex": page, "PageSize": 20, "Type": 2},
+        )
+        rows = _CAFEF_ROW.findall(text)
+        if not rows:
+            break
+        oldest = None
+        for stamp, href, title in rows:
+            try:
+                published = datetime.strptime(stamp, "%d/%m/%Y %H:%M").replace(tzinfo=vn_rules.VN_TZ)
+            except ValueError:
+                continue
+            oldest = published if oldest is None else min(oldest, published)
+            if not (window_start <= published < window_end):
+                continue
+            title = html.unescape(title).strip()
+            if any(k in title.lower() for k in NOISE_KEYWORDS):
+                continue
+            url = href if href.startswith("http") else f"https://cafef.vn{href.split('?')[0]}"
+            items.append(Headline(title=title, source="CafeF", published=published.astimezone(UTC),
+                                  url=url, confirmed=True))
+        if oldest is not None and oldest < window_start:
+            break                      # the window is behind us
     items.sort(key=lambda h: h.published, reverse=True)
     return items[:limit]

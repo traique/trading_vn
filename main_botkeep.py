@@ -20,6 +20,7 @@ import uvicorn  # noqa: E402
 from vnbot.jobs import JobQueue, prune_cache  # noqa: E402
 from vnbot.service import DailyScheduler, Watchlist  # noqa: E402
 from vnbot.telegram_bot import TelegramBot  # noqa: E402
+from vnbot.trader import TradingBot  # noqa: E402
 from vnbot.web import create_app  # noqa: E402
 
 
@@ -40,16 +41,23 @@ def main() -> None:
         logging.warning("No AI provider configured: set ROUTER9_BASE_URL+ROUTER9_API_KEY or GROQ/OPENROUTER/XAI keys")
     else:
         logging.info("AI provider chain: %s", " -> ".join(order))
+    if not SETTINGS.web_password:
+        logging.warning("WEB_PASSWORD is not set: the web page stays locked until it is (Telegram still works)")
+    if SETTINGS.telegram_token and not SETTINGS.telegram_allowed_ids:
+        logging.warning("TELEGRAM_ALLOWED_IDS is empty: the bot only answers /id until you add your id")
     logging.info("Removed %d stale cache files", prune_cache(SETTINGS))
 
     jobs = JobQueue(SETTINGS)
     watchlist = Watchlist(SETTINGS)
     bot = TelegramBot(SETTINGS, jobs, watchlist)
+    trader = TradingBot(SETTINGS, watchlist, notify=bot.broadcast)
+    bot.trader = trader
     jobs.start()
     bot.start()
-    DailyScheduler(SETTINGS, jobs, watchlist).start()
+    DailyScheduler(SETTINGS, jobs, watchlist, bot=trader, notify=bot.broadcast).start()
+    logging.info("Trading bot: mode %s, calibration %s", SETTINGS.trade_mode, "on" if SETTINGS.calibrate else "off")
 
-    app = create_app(SETTINGS, jobs, watchlist)
+    app = create_app(SETTINGS, jobs, watchlist, trader=trader)
     uvicorn.run(app, host="0.0.0.0", port=SETTINGS.port, log_level="warning", access_log=False)
 
 

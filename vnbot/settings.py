@@ -23,6 +23,30 @@ def _int(name: str, default: int) -> int:
         return default
 
 
+def _hhmm(name: str, default: str) -> str:
+    """HH:MM with two-digit hours ("9:00" -> "09:00"), so times compare as text."""
+    raw = (os.environ.get(name) or "").strip()
+    try:
+        hour, minute = (int(x) for x in raw.split(":", 1))
+        if 0 <= hour < 24 and 0 <= minute < 60:
+            return f"{hour:02d}:{minute:02d}"
+    except ValueError:
+        pass
+    return default
+
+
+def _flag(name: str, default: bool) -> bool:
+    raw = (os.environ.get(name) or "").strip().lower()
+    if not raw:
+        return default
+    return raw in ("1", "true", "yes", "on", "co", "có")
+
+
+def _choice(name: str, options: tuple[str, ...], default: str) -> str:
+    raw = (os.environ.get(name) or "").strip().lower()
+    return raw if raw in options else default
+
+
 def _ids(name: str) -> frozenset[int]:
     out = set()
     for part in (os.environ.get(name) or "").replace(";", ",").split(","):
@@ -50,6 +74,12 @@ class Settings:
     risk_rounds: int
     max_tool_rounds: int
     keep_reports: int
+    max_pending: int = 10           # web/Telegram requests allowed to wait at once
+    trade_mode: str = "paper"       # paper | signal | off
+    paper_capital: float = 1_000_000_000.0
+    universe_vn30: bool = True      # trade VN30 (plus the watchlist)
+    calibrate: bool = True          # nightly self-calibration of the thresholds
+    signal_strategy: str = "momentum"   # which paper strategy the real signals follow
     extra: dict = field(default_factory=dict)
 
 
@@ -74,7 +104,7 @@ def load() -> Settings:
         telegram_allowed_ids=allowed,
         telegram_report_chat_ids=_ids("TELEGRAM_REPORT_CHAT_IDS") or allowed,
         watchlist_default=watch,
-        daily_report_time=os.environ.get("DAILY_REPORT_TIME") or "15:30",
+        daily_report_time=_hhmm("DAILY_REPORT_TIME", "15:30"),
         cache_max_age_days=_int("CACHE_MAX_AGE_DAYS", 3),
         quick_model=os.environ.get("QUICK_MODEL") or os.environ.get("ROUTER9_MODEL") or "default",
         deep_model=os.environ.get("DEEP_MODEL") or os.environ.get("ROUTER9_MODEL") or "default",
@@ -82,6 +112,12 @@ def load() -> Settings:
         risk_rounds=_int("MAX_RISK_ROUNDS", 1),
         max_tool_rounds=_int("MAX_TOOL_ROUNDS", 8),
         keep_reports=_int("KEEP_REPORTS", 60),
+        max_pending=max(1, _int("MAX_PENDING", 10)),
+        trade_mode=_choice("TRADE_MODE", ("paper", "signal", "off"), "paper"),
+        paper_capital=float(max(_int("PAPER_CAPITAL", 1_000_000_000), 10_000_000)),
+        universe_vn30=_flag("UNIVERSE_VN30", True),
+        calibrate=_flag("AUTO_CALIBRATE", True),
+        signal_strategy=_choice("SIGNAL_STRATEGY", ("momentum", "engine"), "momentum"),
     )
 
 

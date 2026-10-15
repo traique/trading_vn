@@ -206,6 +206,27 @@ def plan_lines(decision: dict) -> list[str]:
         if decision.get("suggested_shares"):
             sizing += f" (~{rfmt.fmt_price(decision['suggested_shares'])} cổ phiếu, lô 100)"
     rr = decision.get("rr_ratio")
+    action = decision.get("action")
+    if action == "SELL":
+        # A SELL exits at once: no stop, target or R:R. Its two levels are where
+        # the signal fails and a support below, named as such.
+        lines = [f"**{label}**: not provided" for label in
+                 ("Entry Zone", "Stop Loss", "Target 1", "Target 2", "Risk/Reward", "Position Sizing")]
+        if decision.get("stop_price") is not None:
+            lines.append(f"**Invalidation Level**: {_vnd(decision['stop_price'])}")
+        if decision.get("target_price") is not None:
+            lines.append(f"**Support Level**: {_vnd(decision['target_price'])}")
+        return lines
+    if decision.get("entry_low") is None and action != "HOLD":
+        # WATCH / NO_TRADE: the system gives no plan, so no stop, target or R:R either.
+        return [
+            "**Entry Zone**: not provided",
+            "**Stop Loss**: not provided",
+            "**Target 1**: not provided",
+            "**Target 2**: not provided",
+            "**Risk/Reward**: not provided",
+            "**Position Sizing**: not provided",
+        ]
     return [
         f"**Entry Zone**: {entry}",
         f"**Stop Loss**: {_vnd(decision.get('stop_price'))}",

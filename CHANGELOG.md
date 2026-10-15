@@ -6,7 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Changes that need action when upgrading are listed under "Upgrading from" in their release.
 
-## [Unreleased] — Vietnamese market edition
+## [0.7.1] — 2026-10-14
+
+### Added
+
+- **`/chay` and a "Chạy phiên ngay" button on `/bot`** run the bot on the last closed VNINDEX session in the background, for when the server restarted past `DAILY_REPORT_TIME`. A session already run is not run twice: the daily job and `/chay` return the saved report (`last_report.json`).
+- **Light and dark theme** for every web page and the HTML reports, following the device setting, with a sun/moon switch in the header that the browser remembers. Peach-tea, orange and lemongrass palette; Be Vietnam Pro text.
+- **NAV chart on `/bot`**: both paper books and VNINDEX indexed to 100, with direct end labels and a hover readout.
+
+### Changed
+
+- **Output Guard runs early as well.** The Research Manager's plan and the Trader's plan are checked right after they are written, so the risk team and the Portfolio Manager no longer read a recommendation that contradicts the Quant Engine. The final check is unchanged and keeps the notes of the early ones.
+- The web pages are redesigned for phones and desktops: sticky header with navigation, action badges, KPI tiles, scrollable tables, a progress stepper on the analysis page.
+
+## [0.7.0] — 2026-10-14 — Vietnamese market edition
 
 The framework analyses Vietnamese stocks (HOSE, HNX, UPCoM) only, on Vietnamese data, and a deterministic quantitative engine decides the action that the agents explain.
 
@@ -17,11 +30,26 @@ The framework analyses Vietnamese stocks (HOSE, HNX, UPCoM) only, on Vietnamese 
 - **Output Guard.** A last graph step checks the Research Manager, Trader and Portfolio Manager texts in code: a contradicting action is replaced by the system summary, a price that is in no data is flagged, the final rating is always the engine's, and one standard disclaimer ends the decision.
 - **Market rules** in `tradingagents/market/vn_rules.py`: price bands, tick sizes, board lots, T+2 settlement, sessions and round-trip costs. The trade plan rounds to the tick, sizes in lots of 100 when cash is given, and the backtest scores BUY net of costs.
 - Tools `get_corporate_events` and `get_market_context` (indices, VNINDEX regime, sector rotation).
+- **Money flows in the Quant Engine.** Foreign and proprietary (tự doanh) net trading per stock and foreign room (VCI), market-wide foreign/proprietary flow (CafeF), ETF creations/redemptions (VCI) and HOSE breadth (VNDirect), cached per day and read point-in-time. Market-wide foreign selling and a VNINDEX high on weakening breadth each lower the regime a notch; stock flows move confidence in the direction of the signal; a full foreign room voids foreign buying. With `flow_weight` 0 and the switches off, decisions are the original ones.
+- **Tunable thresholds** (`quant/params.py`): the policy's gates and the flow thresholds, defaults equal to the original constants, the set in force read from `quant_params.json`.
+- **Trading bot** (`tradingagents/trading/`, `vnbot/trader.py`). A paper account trades the engine on VN30 plus the watchlist every session under Vietnamese rules (limit buys at the top of the entry zone, lots of 100, T+2, fees and sell tax, stop / half at T1 with a break-even stop / rest at T2 / time stop, no fills on limit-locked sessions). `TRADE_MODE=signal` adds suggested orders for a real book that its owner updates with `/khop` and `/von`. No order is ever sent to a broker. Telegram `/danhmuc`, `/lenh`, `/hieuchinh`; web page `/bot`.
+- **Momentum rotation** (`trading/momentum.py`), a second strategy on its own paper book beside the Quant Engine's: the top 5 VN30 stocks by ~3-month return, equal weight, re-ranked every ~21 sessions, all cash while VNINDEX is under its 100-session average; orders at the next open through the same ledger. Backtest 01/2022-10/2026 on today's VN30: +91% with a 21% max drawdown (VNINDEX +13.8%), positive in both the falling and the rising half. The daily report compares the two books; `SIGNAL_STRATEGY` picks which one the real signals follow (default momentum).
+- **Quant Engine strategy variants as parameters**, off by default: distribution days with a minimum drop and O'Neil's 5% expiry, the first resistance that pays the minimum R:R, breakouts with a projected target, a share sold at T1 and a trailing stop instead of T2. Tested 2022-2024 then confirmed on 2024-2026: they did not hold up, so the defaults are unchanged; the calibration may still move them.
+- **Nightly self-calibration** (champion/challenger): one tunable moved one step at most per night, accepted only when it beats the thresholds in force on the training sessions and again on the 60 most recent sessions it was not chosen on, with enough trades and no deeper drawdown; the previous set and the defaults are always challengers. History in `calibration_history.jsonl`.
+- **Botkeep hardening.** The web page stays locked until `WEB_PASSWORD` is set, refuses forms posted from another site and cannot be framed; a request for a ticker and date already waiting or running joins that analysis; people can keep at most `MAX_PENDING` (default 10) requests waiting; the daily run skips weekday holidays (no VNINDEX session) and retries when the data cannot be read; Telegram flood control (429) is waited out; `DAILY_REPORT_TIME` accepts `9:05`.
 
 ### Changed
 
 - The rating scale is the engine's five actions; the Research Manager states its stance on the action, the Trader writes the execution notes, the Portfolio Manager writes the thesis and risks.
 - Reports are in Vietnamese by default; the benchmark is VNINDEX; tickers accept `FPT`, `FPT.VN`, `HOSE:FPT`.
+- The Quant Engine pairs a stock's closes with VNINDEX by trading date (not by array position) for relative strength, so a suspended or newly listed stock is compared over the same sessions.
+- A close-to-close move inside the exchange's band (UPCoM ±15%, HNX ±10%) is no longer taken for an unadjusted ex-rights gap unless it is a drop matching a bonus/split ratio, and a rise never locks the stock; penny prices keep a one-tick band.
+- **CafeF ticker news** (`Events_RelatedNews_New.aspx`, plain HTML, paged back to the window) joins VCI disclosures, CafeF research and Google News.
+- **Output Guard** catches plain calls ("Mua vào", "Khuyến nghị: Mua", "giải ngân", "tăng/giảm tỷ trọng", "Overweight", "bán ra", "cắt lỗ ngay"); ignores conditional, rule and market-side uses of BÁN/MUA ("nếu thủng stop thì BÁN", "T+2 mới được BÁN", "khối ngoại bán ròng", "lực BÁN"); counts a negation only next to the word; reads a price at the end of a sentence; leaves volumes, EPS and values in tỷ/triệu out of the price check; removes only the model's own "task done" line.
+- WATCH / NO_TRADE trader proposals carry no stop, target or R:R; a SELL names its levels as invalidation and support. The HTML report colours the five actions.
+- Packaging: `pip install ".[bot]"` installs the always-on app (vnbot is part of the package); `docker compose --profile bot up -d bot` runs it; `data/` is ignored by git.
+- The Output Guard no longer flags index points ("VNINDEX 1.720 điểm") as prices outside the data.
+- The README is rewritten in Vietnamese around this edition, with a full Botkeep guide in `deploy/botkeep/README.md`.
 
 ### Removed
 

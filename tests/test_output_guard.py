@@ -126,3 +126,17 @@ def test_the_engine_node_passes_the_book(monkeypatch):
     create_quant_engine()({"company_of_interest": "FPT", "trade_date": "2026-10-13",
                            "portfolio": {"cash": 1e9, "positions": [{"ticker": "FPT.VN", "quantity": 500}]}})
     assert seen["portfolio"].position_in("FPT").quantity == 500
+
+
+@pytest.mark.unit
+def test_the_early_check_cleans_a_plan_before_later_agents_read_it():
+    state = _state()
+    node = output_guard.guard_early(lambda s: {"investment_plan": "Kết luận: MUA ngay toàn bộ."},
+                                    "investment_plan", "Research Manager")
+    out = node(state)
+    assert output_guard.CONFLICT_NOTE in out["investment_plan"]
+    assert "Research Manager" in out["guard_notes"]
+    final = output_guard.create_output_guard()({**state, **out, "final_trade_decision": "ok"})
+    assert "Research Manager" in final["guard_notes"]             # the early note survives the last check
+    untouched = output_guard.guard_early(lambda s: {"investment_plan": ""}, "investment_plan", "RM")(state)
+    assert untouched == {"investment_plan": ""}

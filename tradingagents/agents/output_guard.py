@@ -40,6 +40,7 @@ _SYSTEM_LINE_PREFIXES = (
     "**Rating**:", "**Recommendation**:", "**Action**:", "FINAL TRANSACTION PROPOSAL:",
     "**Entry Zone**:", "**Stop Loss**:", "**Target 1**:", "**Target 2**:",
     "**Risk/Reward**:", "**Position Sizing**:", "**Price Target**:",
+    "**Invalidation Level**:", "**Support Level**:",
 )
 
 
@@ -94,9 +95,32 @@ def guard_text(text: str, state, *, label: str) -> tuple[str, str | None]:
     return text, None
 
 
+def guard_early(node, key: str, label: str):
+    """``node`` with its ``key`` output checked at once, before later agents read it.
+
+    The Research Manager's plan feeds the Trader, the risk team and the
+    Portfolio Manager; the Trader's plan feeds the last two. Checked only at
+    the end, a contradiction there would already have shaped every later prompt.
+    """
+    def guarded_node(state) -> dict:
+        out = node(state)
+        text = (out or {}).get(key)
+        if not text:
+            return out
+        guarded, note = guard_text(text, {**state, **out}, label=label)
+        if note is None:
+            return out
+        logger.info("Output Guard (early) changed %s", label)
+        notes = [n for n in (state.get("guard_notes") or "").splitlines() if n]
+        return {**out, key: guarded, "guard_notes": "\n".join([*notes, note])}
+
+    return guarded_node
+
+
 def create_output_guard():
     def output_guard_node(state) -> dict:
-        notes: list[str] = []
+        # Notes from the early checks (after the Research Manager and the Trader) are kept.
+        notes: list[str] = [n for n in (state.get("guard_notes") or "").splitlines() if n]
         updates: dict = {}
         for key, label in (
             ("investment_plan", "Research Manager"),

@@ -717,6 +717,28 @@ def calc_distribution_days(closes: list[float], volumes: list[float], lookback: 
     return count
 
 
+def distribution_events(
+    closes: list[float], volumes: list[float], lookback: int = 25
+) -> tuple[tuple[float, float], ...]:
+    """Candidate distribution days of the last ``lookback`` sessions, raw: every
+    session that closed down on higher volume than the previous one, as
+    (change %, best close since then vs that close %). The policy decides
+    with its own thresholds which of them count (see params.dist_*)."""
+    n = min(len(closes), len(volumes))
+    if n < 2:
+        return ()
+    c, v = closes[-n:], volumes[-n:]
+    out = []
+    for i in range(max(1, len(c) - lookback), len(c)):
+        if c[i - 1] <= 0 or c[i] <= 0:
+            continue
+        change_pct = (c[i] - c[i - 1]) / c[i - 1] * 100
+        if change_pct < 0 and v[i] > v[i - 1]:
+            best_after = max(c[i:])
+            out.append((round(change_pct, 3), round((best_after / c[i] - 1) * 100, 3)))
+    return tuple(out)
+
+
 def calc_liquidity(
     volumes: list[float], min_avg_volume: float = 100_000, percentile_lookback: int = 60
 ) -> Liquidity | None:

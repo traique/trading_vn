@@ -24,6 +24,11 @@ from vnbot.settings import Settings, graph_config
 logger = logging.getLogger(__name__)
 
 MAX_JOBS_KEPT = 200
+ACTIVE = ("queued", "quick", "running")
+
+
+class QueueFull(ValueError):
+    """Too many requests waiting; the message is shown to the asker."""
 
 
 @dataclass
@@ -43,6 +48,16 @@ class Job:
     guard_notes: str = ""
     report_dir: str = ""
     error: str = ""
+    # Everyone who asked for this ticker and date while it was waiting or
+    # running: the same analysis serves them all instead of running twice.
+    chat_ids: list[int] = field(default_factory=list)
+    sources: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if self.chat_id is not None and self.chat_id not in self.chat_ids:
+            self.chat_ids.append(self.chat_id)
+        if self.source and self.source not in self.sources:
+            self.sources.append(self.source)
 
     @property
     def html_path(self) -> Path | None:
@@ -74,13 +89,38 @@ class JobQueue:
 
     # ── public API ──
     def submit(self, ticker: str, date: str, source: str, chat_id: int | None = None) -> Job:
-        job = Job(id=uuid.uuid4().hex[:10], ticker=ticker, date=date, source=source, chat_id=chat_id)
+        """Queue an analysis, or join the one already waiting/running for this ticker and date.
+
+        Requests from people (web, Telegram) are refused with QueueFull once
+        ``max_pending`` of them wait; the daily watchlist run is not capped
+        (the watchlist itself is at most 30 codes).
+        """
         with self._lock:
+            for existing in self._jobs.values():
+                if existing.ticker == ticker and existing.date == date and existing.status in ACTIVE:
+                    if chat_id is not None and chat_id not in existing.chat_ids:
+                        existing.chat_ids.append(chat_id)
+                    if source not in existing.sources:
+                        existing.sources.append(source)
+                    self._save()
+                    return existing
+            if source != "daily":
+                waiting = sum(1 for j in self._jobs.values() if j.status == "queued" and j.source != "daily")
+                if waiting >= self.settings.max_pending:
+                    raise QueueFull(
+                        f"Hàng đợi đang có {waiting} lượt chờ (tối đa {self.settings.max_pending}). "
+                        "Thử lại sau ít phút."
+                    )
+            job = Job(id=uuid.uuid4().hex[:10], ticker=ticker, date=date, source=source, chat_id=chat_id)
             self._jobs[job.id] = job
             self._trim()
             self._save()
         self._queue.put(job.id)
         return job
+
+    def is_active(self) -> bool:
+        with self._lock:
+            return any(j.status in ACTIVE for j in self._jobs.values())
 
     def get(self, job_id: str) -> Job | None:
         with self._lock:
@@ -173,7 +213,7 @@ class JobQueue:
             return
         for row in rows:
             job = Job(**{k: v for k, v in row.items() if k in Job.__dataclass_fields__})
-            if job.status in ("queued", "quick", "running"):
+            if job.status in ACTIVE:
                 # The process stopped mid-job: say so rather than show it running forever.
                 job.status, job.error = "failed", "máy chủ khởi động lại khi đang phân tích"
             self._jobs[job.id] = job

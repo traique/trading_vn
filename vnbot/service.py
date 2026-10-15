@@ -78,11 +78,17 @@ class Watchlist:
 
 
 class DailyScheduler:
-    """Analyses the watchlist once each weekday at ``daily_report_time`` (Vietnam time)."""
+    """Each trading day at ``daily_report_time`` (Vietnam time): the trading bot's
+    session, the watchlist's full analyses, then the nightly calibration."""
 
-    def __init__(self, settings: Settings, jobs: JobQueue, watchlist: Watchlist):
+    RETRY_SECONDS = 600
+
+    def __init__(self, settings: Settings, jobs: JobQueue, watchlist: Watchlist, bot=None, notify=None):
         self.settings, self.jobs, self.watchlist = settings, jobs, watchlist
+        self.bot = bot
+        self.notify = notify or (lambda text: None)
         self._stamp = settings.data_dir / "last_daily_run.txt"
+        self._next_try = 0.0
         self._thread = threading.Thread(target=self._loop, name="daily-scheduler", daemon=True)
 
     def start(self) -> None:
@@ -98,17 +104,62 @@ class DailyScheduler:
         last = self._stamp.read_text(encoding="utf-8").strip() if self._stamp.exists() else ""
         return None if last == day else day
 
+    @staticmethod
+    def _is_trading_day(day: str) -> bool:
+        """VNINDEX has a bar for ``day``: weekday holidays (Tết, 30/4, 2/9...) have none.
+
+        Raises the vendor's error when the data cannot be read, so the run is
+        retried later rather than skipped.
+        """
+        from tradingagents.dataflows.ohlcv import load_ohlcv
+        from tradingagents.market import vn_rules
+
+        if vn_rules.is_market_hours():
+            return True   # today's bar is held back until 15:00; a weekday is assumed open
+        frame = load_ohlcv(vn_rules.BENCHMARK, day)
+        return bool(len(frame)) and frame["Date"].iloc[-1].strftime("%Y-%m-%d") == day
+
+    def _trade(self, day: str) -> None:
+        if self.bot is None or self.settings.trade_mode == "off":
+            return
+        try:
+            self.notify(self.bot.run_day(day))
+        except Exception as exc:  # noqa: BLE001 - the watchlist run still goes ahead
+            logger.exception("Trading bot session %s failed", day)
+            self.notify(f"❌ Bot giao dịch lỗi phiên {day}: {exc}")
+
+    def _calibrate(self, day: str) -> None:
+        if self.bot is None or not self.settings.calibrate or self.settings.trade_mode == "off":
+            return
+        try:
+            self.notify(self.bot.calibrate(day))
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Calibration %s failed", day)
+            self.notify(f"⚠️ Hiệu chỉnh {day} không chạy được: {exc}")
+
     def _loop(self) -> None:
         while True:
             try:
-                day = self._due()
+                day = self._due() if time.time() >= self._next_try else None
                 if day:
+                    try:
+                        trading = self._is_trading_day(day)
+                    except Exception as exc:  # noqa: BLE001 - data source down: try again later
+                        logger.warning("Daily run %s: cannot read VNINDEX (%s); retrying in %ds",
+                                       day, exc, self.RETRY_SECONDS)
+                        self._next_try = time.time() + self.RETRY_SECONDS
+                        continue
                     self._stamp.write_text(day, encoding="utf-8")
+                    if not trading:
+                        logger.info("Daily run %s skipped: no VNINDEX session that day (holiday)", day)
+                        continue
                     removed = prune_cache(self.settings)
+                    self._trade(day)
                     codes = self.watchlist.get()
                     logger.info("Daily run %s: %d codes, %d stale cache files removed", day, len(codes), removed)
                     for code in codes:
                         self.jobs.submit(code, day, "daily")
+                    self._calibrate(day)
             except Exception:  # noqa: BLE001 - the scheduler must keep ticking
                 logger.exception("Daily scheduler tick failed")
             time.sleep(30)

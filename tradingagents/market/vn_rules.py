@@ -100,6 +100,11 @@ def ceiling_floor(reference_price: float, exchange: str | None, *, first_day: bo
     raw_floor = reference_price * (1 - band)
     ceiling = math.floor(raw_ceiling / tick_size(raw_ceiling, ex)) * tick_size(raw_ceiling, ex)
     floor = math.ceil(raw_floor / tick_size(raw_floor, ex)) * tick_size(raw_floor, ex)
+    # A band narrower than one tick (very low prices) still moves one tick each way.
+    if ceiling <= reference_price:
+        ceiling = reference_price + tick_size(reference_price, ex)
+    if floor >= reference_price and reference_price - tick_size(reference_price, ex) > 0:
+        floor = reference_price - tick_size(reference_price, ex)
     return float(ceiling), float(floor)
 
 

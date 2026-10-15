@@ -21,7 +21,7 @@ from tradingagents.agents import (
     create_trader,
 )
 from tradingagents.agents.analysts.turn import WRAP_UP
-from tradingagents.agents.output_guard import create_output_guard
+from tradingagents.agents.output_guard import create_output_guard, guard_early
 from tradingagents.agents.quant_engine import create_quant_engine
 from tradingagents.agents.state import AgentState
 
@@ -149,8 +149,9 @@ class GraphSetup:
 
         workflow.add_node("Bull Researcher", bull_researcher_node)
         workflow.add_node("Bear Researcher", bear_researcher_node)
-        workflow.add_node("Research Manager", research_manager_node)
-        workflow.add_node("Trader", trader_node)
+        workflow.add_node("Research Manager",
+                          guard_early(research_manager_node, "investment_plan", "Research Manager"))
+        workflow.add_node("Trader", guard_early(trader_node, "trader_investment_plan", "Trader"))
         workflow.add_node("Aggressive Analyst", aggressive_analyst)
         workflow.add_node("Neutral Analyst", neutral_analyst)
         workflow.add_node("Conservative Analyst", conservative_analyst)
