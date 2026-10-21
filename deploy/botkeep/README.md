@@ -3,7 +3,7 @@
 Hướng dẫn chạy TradingAgents VN liên tục trên Botkeep (hoặc bất kỳ máy chủ Python nào luôn bật). Một tiến trình `main_botkeep.py` gồm:
 
 - **Trang web**: nhập mã cổ phiếu, xem hàng đợi, đọc báo cáo HTML của các agent, sửa danh sách theo dõi.
-- **Bot Telegram**: `/phantich`, `/nhanh`, `/theodoi`, `/trangthai`, `/id`.
+- **Bot Telegram**: `/phantich`, `/phanbien`, `/nhanh`, `/theodoi`, `/trangthai`, `/id`.
 - **Báo cáo tự động** cho danh sách theo dõi sau giờ đóng cửa mỗi ngày giao dịch (ngày lễ tự bỏ qua).
 - **Bot giao dịch** chạy ba chiến lược song song (Phòng thủ - mặc định, Quant Engine và Động lượng VN30), mỗi chiến lược một tài khoản ảo, kèm (tuỳ chọn) lệnh đề xuất cho tài khoản thật. **Mỗi đêm bot tự hiệu chỉnh ngưỡng** của Quant Engine và Động lượng (Phòng thủ giữ bộ đã kiểm định). Không bao giờ gửi lệnh tới CTCK.
 
@@ -87,6 +87,8 @@ Botkeep tự đặt `SERVER_PORT`; chạy nơi khác thì dùng `PORT` (mặc đ
 | `/phantich FPT` | Phân tích đầy đủ bằng các agent (vài phút) |
 | `/phantich FPT 2026-10-01` | Phân tích tại một ngày trong quá khứ (chỉ dùng dữ liệu có đến ngày đó) |
 | `/nhanh FPT` | Chỉ quyết định của Quant Engine, không gọi AI (vài giây) |
+| `/phanbien FPT [YYYY-MM-DD]` | AI phản biện quyết định của Quant Engine: **1 lượt gọi AI**, trả lời đồng ý/phản đối kèm lý do |
+| `/phanbien` | AI phản biện đúng bao nhiêu (kết quả bóng của các lần phản biện) |
 | `/theodoi FPT,HPG,VCB` | Đặt danh sách báo cáo tự động (tối đa 30 mã) |
 | `/theodoi` | Xem danh sách đang theo dõi |
 | `/trangthai` | Hàng đợi và trạng thái các nhà cung cấp AI |
@@ -114,7 +116,14 @@ Mã nhận được các dạng `FPT`, `fpt`, `FPT.VN`, `HOSE:FPT`. Chỉ số (
 Hai lịch chạy độc lập (giờ Việt Nam):
 
 1. **Bot giao dịch** (nếu `TRADE_MODE` khác `off`), mỗi ngày lúc `TRADE_TIME` (mặc định = `DAILY_REPORT_TIME` nếu sau 15:05, ngược lại 15:30; **không bao giờ trước 15:05**, khi nến ngày mới chốt): khớp các phiên chưa xử lý, ra quyết định, đặt lệnh cho phiên tới cho cả ba chiến lược, gửi báo cáo 🛡️ Phòng thủ, 🤖 Quant Engine, 🚀 Động lượng và 📊 so sánh qua Telegram. Sau đó **tự hiệu chỉnh** (nếu `AUTO_CALIBRATE=1`) trên phiên vừa xử lý, gửi kết quả ⚙️.
-2. **Sàng lọc watchlist rồi mới gọi AI**, thứ Hai - thứ Sáu lúc `DAILY_REPORT_TIME` (có thể đặt buổi sáng; trước giờ đóng cửa phân tích dùng phiên đã đóng gần nhất). Quant Engine xét mọi mã (không tốn lượt AI) và gửi một tin tóm tắt; chỉ `DAILY_AI_MAX` (mặc định 3) mã có hành động trong `DAILY_AI_ACTIONS` (mặc định `BUY,SELL`), xếp theo độ tin cậy của engine, mới được AI phân tích đầy đủ, và chỉ khi hạn mức AI trong ngày còn đủ. Mã khác muốn xem AI thì gửi `/phantich MÃ`.
+2. **Sàng lọc watchlist rồi mới gọi AI**, thứ Hai - thứ Sáu lúc `DAILY_REPORT_TIME` (có thể đặt buổi sáng; trước giờ đóng cửa phân tích dùng phiên đã đóng gần nhất). Quant Engine xét mọi mã (không tốn lượt AI) và gửi một tin tóm tắt; chỉ `DAILY_AI_MAX` (mặc định 5) mã có hành động trong `DAILY_AI_ACTIONS` (mặc định `BUY,SELL`), xếp theo độ tin cậy của engine, mới được gửi AI, và chỉ khi hạn mức AI trong ngày còn đủ. Cách gửi theo `DAILY_AI_MODE`:
+   - `critic` (mặc định, giống bot OKX): **mỗi mã 1 lượt gọi AI**. AI được giao nhiệm vụ tìm lý do để từ chối quyết định của hệ thống và trả lời đồng ý/phản đối, độ chắc, lý do, rủi ro chính. AI không đổi hành động hay mức giá, bot giao dịch không đi theo AI.
+   - `full`: chuỗi agent đầy đủ như `/phantich` (khoảng 25 lượt gọi mỗi mã).
+   - `off`: chỉ gửi kết quả của Quant Engine.
+
+   **Kết quả bóng:** mỗi lần phản biện được lưu (`data/critic_log.json`) và chấm trên các phiên sau đó. Lệnh MUA: vào giá đóng cửa ngày quyết định, chạm stop trước (−1R), chạm mục tiêu (+R:R), hoặc hết 20 phiên. Lệnh BÁN: giá sau 10 phiên. Tin hằng ngày và `/phanbien` cho biết các lệnh AI phản đối kết thúc ra sao, tức AI chặn đúng bao nhiêu phần trăm. 5 kết quả gần nhất được đưa vào lời nhắc của lần phản biện sau, không tốn thêm lượt gọi.
+
+   Mã khác muốn AI xem thì gửi `/phanbien MÃ` (1 lượt) hoặc `/phantich MÃ` (đầy đủ).
 
 - **Ngày lễ:** bot giao dịch chỉ xử lý những phiên VNINDEX thực sự có nến, nên ngày lễ tự bỏ qua; phân tích watchlist cũng bỏ qua ngày lễ khi chạy sau 15:05.
 - **Chạy bù:** mỗi lần chạy (kể cả lúc server khởi động), bot xử lý lần lượt mọi phiên bị lỡ từ phiên cuối đã xử lý, mỗi phiên chỉ dùng dữ liệu tới phiên đó. Bù tối đa 20 phiên; phiên cũ hơn bị bỏ qua và lệnh chờ của chúng bị huỷ (báo cáo có ghi).
@@ -185,8 +194,9 @@ Một lượt phân tích đầy đủ tốn khoảng 15-35 lượt gọi AI (4 
 | `SERVER_PORT` / `PORT` | 8080 | Cổng web |
 | `WATCHLIST` | - | Watchlist ban đầu (chỉ dùng lần chạy đầu) |
 | `DAILY_REPORT_TIME` | `15:30` | Giờ phân tích watchlist tự động (HH:MM, giờ VN) |
-| `DAILY_AI_MAX` | 3 | Số mã watchlist được AI phân tích đầy đủ mỗi ngày (0 = không gọi AI ở lượt tự động) |
-| `DAILY_AI_ACTIONS` | `BUY,SELL` | Hành động của Quant Engine đáng để AI phân tích |
+| `DAILY_AI_MODE` | `critic` | Lượt tự động gọi AI thế nào: `critic` (1 lượt/mã), `full` (chuỗi agent, ~25 lượt/mã), `off` |
+| `DAILY_AI_MAX` | 5 | Số mã watchlist được gửi AI mỗi ngày (0 = không gọi AI ở lượt tự động) |
+| `DAILY_AI_ACTIONS` | `BUY,SELL` | Hành động của Quant Engine đáng để hỏi AI |
 | `TRADE_TIME` | `DAILY_REPORT_TIME` nếu ≥ 15:05, ngược lại `15:30` | Giờ bot giao dịch + hiệu chỉnh chạy (HH:MM, giờ VN); giá trị trước 15:05 được nâng lên 15:05 |
 | `MAX_PENDING` | 10 | Số lượt chờ tối đa từ web/Telegram |
 | `TRADE_MODE` | `paper` | `paper` / `signal` / `off` |

@@ -238,6 +238,32 @@ def test_nhanh_answers_with_the_engine_only(bot, engine_stub):
 
 
 @pytest.mark.unit
+def test_phanbien_asks_the_ai_once_and_keeps_the_verdict(bot, monkeypatch):
+    from tradingagents.quant import engine
+    from vnbot import critic
+
+    result = SimpleNamespace(symbol="HPG", action="BUY", confidence=0.8, price=100.0, stop_price=95.0,
+                             target_price=110.0, deterministic_summary="HPG - BUY", reasons=[], scenarios=[])
+    monkeypatch.setattr(engine, "analyze", lambda code, day: result)
+    monkeypatch.setattr(critic, "bars_after", lambda code, day: [])
+    prompts = []
+
+    class LLM:
+        def invoke(self, messages):
+            prompts.append(messages)
+            return SimpleNamespace(content='{"verdict": "REJECT", "confidence": 70, "reason": "VNINDEX yếu"}')
+
+    bot._critic_llm = LLM()
+    bot._handle(_msg("/phanbien hpg 2026-10-13"))
+    texts = _texts(bot)
+    assert len(prompts) == 1
+    assert "đang phản biện HPG" in texts[0] and "AI PHẢN ĐỐI 70%: VNINDEX yếu" in texts[1]
+    assert [r["code"] for r in critic.CriticLog(bot.settings.data_dir).rows()] == ["HPG"]
+    bot._handle(_msg("/phanbien"))
+    assert "AI phản biện" in _texts(bot)[-1]
+
+
+@pytest.mark.unit
 def test_theodoi_sets_and_shows_the_watchlist(bot):
     bot._handle(_msg("/theodoi vcb ssi"))
     bot._handle(_msg("/theodoi"))

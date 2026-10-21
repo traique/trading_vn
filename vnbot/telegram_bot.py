@@ -100,6 +100,7 @@ HELP = (
     "/phantich FPT - phân tích đầy đủ bằng các agent AI (vài phút)\n"
     "/phantich FPT 2026-10-01 - phân tích tại một ngày trong quá khứ\n"
     "/nhanh FPT - chỉ quyết định của hệ thống định lượng (vài giây)\n"
+    "/phanbien FPT - AI phản biện quyết định của hệ thống (1 lượt gọi AI); /phanbien - AI phản biện đúng bao nhiêu\n"
     "/theodoi FPT,HPG,VCB - đặt danh sách báo cáo tự động mỗi ngày\n"
     "/theodoi - xem danh sách đang theo dõi\n"
     "/trangthai - hàng đợi và trạng thái các nhà cung cấp AI\n"
@@ -154,6 +155,7 @@ class TelegramBot:
         self._session = requests.Session()
         self._thread = threading.Thread(target=self._poll, name="telegram-bot", daemon=True)
         self.trader = None   # vnbot.trader.TradingBot, set by main_botkeep
+        self._critic_llm = None   # the provider chain, built on the first /phanbien
         # Commands of one chat run in order on one lane; a burst waits instead of
         # spawning a thread per message (the host has 2 GB).
         self._lanes = [ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"telegram-cmd-{i}")
@@ -409,6 +411,8 @@ class TelegramBot:
                 self.send(chat_id, self._help())
             elif command == "/phantich":
                 self._analyze(chat_id, args)
+            elif command == "/phanbien":
+                self._critic(chat_id, args)
             elif command == "/nhanh":
                 self.send(chat_id, quick_text(*(args.split()[:2] or [""])))
             elif command == "/theodoi":
@@ -439,6 +443,24 @@ class TelegramBot:
         ahead = self.jobs.position(job.id)
         wait = f" (đang có {ahead} lượt chờ trước)" if ahead else ""
         self.send(chat_id, f"⏳ Đã nhận {code} ngày {day}{wait}. Quyết định hệ thống sẽ tới trước, báo cáo đầy đủ của các agent tới sau vài phút.")
+
+    def _critic(self, chat_id: int, args: str) -> None:
+        """One AI request about the engine's decision (runs on the chat's command lane)."""
+        from tradingagents.quant import engine
+        from vnbot.critic import CriticLog, default_llm
+
+        log = CriticLog(self.settings.data_dir)
+        parts = args.split()
+        if not parts:
+            self.send(chat_id, log.stats_text())
+            return
+        code, day = check_request(parts[0], parts[1] if len(parts) > 1 else None)
+        self.send(chat_id, f"⏳ AI đang phản biện {code} ngày {day} (1 lượt gọi)...")
+        result = engine.analyze(code, day)
+        if self._critic_llm is None:
+            self._critic_llm = default_llm(self.settings)
+        log.settle_now()
+        self.send(chat_id, f"📊 {result.deterministic_summary}\n\n{log.review(day, result, self._critic_llm)}")
 
     def _trading(self, chat_id: int, command: str, args: str) -> None:
         if self.trader is None or self.settings.trade_mode == "off":
