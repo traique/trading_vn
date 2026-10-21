@@ -165,6 +165,22 @@ Mỗi lượt gọi AI đi theo `PROVIDER_ORDER` (mặc định `router9,groq,op
 - Tối đa `LLM_MAX_CONCURRENT` (mặc định 2) yêu cầu cùng lúc.
 - Hạn mức ngày (giờ VN, giữ qua lần khởi động lại trong `data/llm_usage.json`): tổng `LLM_MAX_CALLS_PER_DAY` (mặc định 300) và riêng từng nhà cung cấp `<TÊN>_MAX_CALLS_PER_DAY` (`ROUTER9_`, `GROQ_`, `OPENROUTER_`, `XAI_`; OpenRouter mặc định 45, dưới mức 50 lượt/ngày của gói free; 0 = không giới hạn). Nhà cung cấp hết hạn mức được bỏ qua tới hôm sau; hết tổng hạn mức thì mọi lượt phân tích báo lỗi tới hôm sau. `/trangthai` và trang web hiện số lượt đã dùng.
 
+- Khoảng nghỉ tối thiểu giữa hai lượt gọi tới cùng một nhà cung cấp: `<TÊN>_MIN_INTERVAL_SEC` (mặc định 0). Các lượt gọi cùng lúc xếp hàng lần lượt, không tới dồn một lúc.
+
+**9Router đứng sau một tài khoản ChatGPT free** (vd chatgpt2api giả lập Codex): một tài khoản free chỉ chịu được ít lượt mỗi giờ, trả lời chậm, và dễ bị đánh dấu khi nhận nhiều yêu cầu dồn dập. Nên đặt:
+
+```
+DAILY_AI_MODE=critic             # 1 lượt gọi mỗi mã, chỉ là chat thường (không tool, không JSON mode)
+DAILY_AI_MAX=5
+LLM_MAX_CONCURRENT=1
+ROUTER9_MIN_INTERVAL_SEC=30
+ROUTER9_MAX_CALLS_PER_DAY=40     # chỉnh theo mức tài khoản chịu được
+ROUTER9_RETRY_SEC=1800           # 9Router lỗi thì nghỉ 30 phút, chuyển sang OpenRouter
+LLM_CALL_TIMEOUT_SEC=180
+```
+
+`/phantich` (chuỗi agent) cần gọi tool và structured output, mỗi mã khoảng 25 lượt: với tài khoản free nên hạn chế, dùng `/phanbien` thay thế. Bộ giả lập nào không hỗ trợ tool calling thì lượt đó báo lỗi và chuyển sang nhà cung cấp kế tiếp.
+
 Một lượt phân tích đầy đủ tốn khoảng 15-35 lượt gọi AI (4 analyst kèm các vòng gọi tool, Bull/Bear, Research Manager, Trader, 3 góc nhìn rủi ro, Portfolio Manager). Giảm `MAX_TOOL_ROUNDS` nếu cần tiết kiệm thêm.
 
 `QUICK_MODEL` / `DEEP_MODEL` chọn model trên 9Router cho hai tầng (tầng deep dùng cho Research Manager và Portfolio Manager). Các nhà cung cấp khác dùng `GROQ_MODEL`, `OPENROUTER_MODEL`, `XAI_MODEL`.
@@ -185,6 +201,7 @@ Một lượt phân tích đầy đủ tốn khoảng 15-35 lượt gọi AI (4 
 | `LLM_MAX_CALLS_PER_DAY` | 300 | Tổng lượt gọi AI mỗi ngày (0 = không giới hạn) |
 | `ROUTER9_MAX_CALLS_PER_DAY`, `GROQ_…`, `OPENROUTER_…`, `XAI_…` | 0, OpenRouter 45 | Hạn mức ngày từng nhà cung cấp (0 = không giới hạn) |
 | `LLM_MAX_CONCURRENT` | 2 | Số lượt gọi AI chạy cùng lúc |
+| `ROUTER9_MIN_INTERVAL_SEC`, `GROQ_…`, `OPENROUTER_…`, `XAI_…` | 0 | Số giây tối thiểu giữa hai lượt gọi tới nhà cung cấp đó |
 | `LLM_TRY_RESTING` | 0 | 1 = vẫn gọi nhà cung cấp đang nghỉ khi không còn ai khác |
 | `TELEGRAM_TOKEN` | - | Token bot (bỏ trống = tắt bot) |
 | `TELEGRAM_ALLOWED_IDS` | - | Id được dùng bot |

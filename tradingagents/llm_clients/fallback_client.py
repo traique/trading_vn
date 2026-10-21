@@ -40,6 +40,8 @@ Configuration (environment):
     LLM_MAX_CALLS_PER_DAY  requests per day, all providers (default 300; 0 = no cap)
     ROUTER9_MAX_CALLS_PER_DAY, GROQ_..., OPENROUTER_... (default 45), XAI_...
     LLM_USAGE_PATH       JSON file keeping the day's counts across restarts
+    ROUTER9_MIN_INTERVAL_SEC, GROQ_..., OPENROUTER_..., XAI_...  seconds between two
+                         requests to that provider (default 0)
 """
 
 from __future__ import annotations
@@ -157,6 +159,7 @@ def reset_provider_state() -> None:
         _resting_until.clear()
         _last_error.clear()
         _usage.clear()
+        _next_slot.clear()
     global _semaphore
     _semaphore = None
 
@@ -167,6 +170,7 @@ _VN = timezone(timedelta(hours=7))
 _usage: dict = {}                 # {"day": "YYYY-MM-DD", "total": n, "by": {provider: n}}
 _semaphore: threading.BoundedSemaphore | None = None
 _semaphore_lock = threading.Lock()
+_next_slot: dict[str, float] = {}     # provider -> earliest time of its next request
 DEFAULT_PROVIDER_CAPS = {"openrouter": 45}
 
 
@@ -251,6 +255,24 @@ def budget_left() -> int | None:
         return max(0, cap - _usage_today()["total"])
 
 
+def _pace(name: str) -> None:
+    """Wait so requests to ``name`` are at least ``<PROVIDER>_MIN_INTERVAL_SEC`` apart.
+
+    Each caller reserves the next free moment, so concurrent calls queue up
+    instead of arriving together (a gateway in front of one free account, such
+    as a ChatGPT web session, flags bursts).
+    """
+    interval = _env_float(f"{name.upper()}_MIN_INTERVAL_SEC", 0)
+    if interval <= 0:
+        return
+    with _lock:
+        now = time.time()
+        start = max(now, _next_slot.get(name, 0.0))
+        _next_slot[name] = start + interval
+    if start > now:
+        time.sleep(start - now)
+
+
 def _slot() -> threading.BoundedSemaphore:
     global _semaphore
     with _semaphore_lock:
@@ -330,6 +352,7 @@ def run_chain(chain: Sequence[tuple[str, Any]], call) -> Any:
     errors = []
     for name, model in ordered:
         _spend(name)
+        _pace(name)
         try:
             with _slot():
                 result = call(model)

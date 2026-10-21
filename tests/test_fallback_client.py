@@ -66,7 +66,8 @@ def _fresh_state(monkeypatch):
     for env in ("PROVIDER_ORDER", "ROUTER9_BASE_URL", "ROUTER9_API_KEY", "GROQ_API_KEY",
                 "OPENROUTER_API_KEY", "XAI_API_KEY", "LLM_QUOTA_COOLDOWN_SEC", "ROUTER9_RETRY_SEC",
                 "LLM_TRY_RESTING", "LLM_MAX_CALLS_PER_DAY", "LLM_MAX_CONCURRENT", "LLM_USAGE_PATH",
-                "ROUTER9_MAX_CALLS_PER_DAY", "GROQ_MAX_CALLS_PER_DAY", "OPENROUTER_MAX_CALLS_PER_DAY"):
+                "ROUTER9_MAX_CALLS_PER_DAY", "GROQ_MAX_CALLS_PER_DAY", "OPENROUTER_MAX_CALLS_PER_DAY",
+                "ROUTER9_MIN_INTERVAL_SEC"):
         monkeypatch.delenv(env, raising=False)
     yield
     fc.reset_provider_state()
@@ -160,6 +161,25 @@ def test_a_provider_past_its_daily_cap_is_skipped(monkeypatch):
 @pytest.mark.unit
 def test_openrouter_is_capped_under_its_free_tier_by_default():
     assert fc.provider_cap("openrouter") == 45 and fc.provider_cap("router9") == 0
+
+
+@pytest.mark.unit
+def test_requests_to_a_provider_are_spaced(monkeypatch):
+    clock = {"now": 1000.0}
+    waits = []
+    monkeypatch.setattr(fc.time, "time", lambda: clock["now"])
+    monkeypatch.setattr(fc.time, "sleep", lambda s: waits.append(s))
+    monkeypatch.setenv("ROUTER9_MIN_INTERVAL_SEC", "20")
+    model = _model(Scripted(name_="router9"), Scripted(name_="groq"))
+    model.invoke("1")
+    model.invoke("2")                 # reserved 20 s after the first
+    model.invoke("3")                 # and 20 s after that
+    clock["now"] += 100
+    model.invoke("4")                 # long enough since: no wait
+    assert waits == [20.0, 40.0]
+    monkeypatch.delenv("ROUTER9_MIN_INTERVAL_SEC")
+    model.invoke("5")
+    assert waits == [20.0, 40.0]
 
 
 @pytest.mark.unit
