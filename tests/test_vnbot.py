@@ -595,7 +595,7 @@ def test_the_bot_page_shows_the_book_and_the_thresholds(settings, queue, trader)
     client = TestClient(create_app(settings, queue, Watchlist(settings), trader=trader))
     client.auth = ("u", "s3cret")
     page = client.get("/bot").text
-    assert "Quant Engine" in page and "Động lượng VN30" in page and "So sánh ba chiến lược" in page and "FPT" in page
+    assert "Quant Engine" in page and "Động lượng VN30" in page and "Hiệu quả ba chiến lược" in page and "FPT" in page
     assert "Phòng thủ (mặc định)" in page and "fb_top_k" in page
     assert "confidence_buy_min" in page and "mom_lookback" in page
     assert "/bot" in client.get("/").text
@@ -612,8 +612,8 @@ def test_the_bot_page_and_help_show_when_the_bot_really_runs(settings, queue, tr
     client = TestClient(create_app(settings, queue, Watchlist(settings), trader=trader))
     client.auth = ("u", "s3cret")
     page = client.get("/bot").text
-    assert "tự chạy lúc 16:00" in page and "tự chạy 08:30" not in page
-    assert "lúc 16:00, hoặc bấm" in page and "15:30" not in page
+    assert "tự động chạy lúc 16:00" in page and "chạy lúc 08:30" not in page
+    assert "tự động lúc 16:00 mỗi ngày, hoặc chọn" in page and "15:30" not in page
     assert "không đợi 16:00" in TelegramBot(settings, queue, Watchlist(settings))._help()
 
 
@@ -698,7 +698,7 @@ def test_pages_carry_the_theme_switch_and_the_bot_page_runs_a_session(settings, 
     client.auth = ("u", "s3cret")
     home = client.get("/").text
     assert 'id="theme-toggle"' in home and "prefers-color-scheme:dark" in home and "data-theme=dark" in home
-    assert "Biểu đồ NAV xuất hiện sau 2 phiên" in client.get("/bot").text
+    assert "Biểu đồ NAV sẽ hiển thị sau hai phiên" in client.get("/bot").text
     trader.run_day("2026-10-13")
     trader.run_day("2026-10-14")
     page = client.get("/bot").text

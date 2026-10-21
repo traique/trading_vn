@@ -115,7 +115,7 @@ danh bạ hay tin nhắn không gửi cho bot.</li>
 <p>Không bán, không chia sẻ dữ liệu cho bên thứ ba để quảng cáo. Dữ liệu chỉ được gửi tới Zoom (để trả lời qua Zoom API) và
 nhà cung cấp hạ tầng chạy ứng dụng.</p>
 <h2>4. Lưu trữ và bảo mật</h2>
-<p>Lưu: thông tin ghép đôi (JID, tên, Account ID) cho tới khi gỡ ghép đôi hoặc gỡ ứng dụng; 20 request Zoom gần nhất
+<p>Lưu: thông tin ghép đôi (JID, tên, Account ID) cho tới khi gỡ ghép đôi hoặc gỡ ứng dụng; 20 yêu cầu Zoom gần nhất
 (có thể chứa nội dung lệnh) để chẩn đoán. Mọi yêu cầu từ Zoom được xác thực chữ ký HMAC; mã truy cập Zoom chỉ giữ trong
 bộ nhớ, không ghi ra đĩa.</p>
 <h2>5. Xoá dữ liệu</h2>
@@ -144,7 +144,7 @@ def terms_body() -> str:
     return f"""
 <h1>Điều khoản sử dụng</h1><p class="muted">Cập nhật lần cuối: {UPDATED_VI}</p>
 <h2>1. Phạm vi</h2><p>{APP_NAME} là công cụ cá nhân để chủ ứng dụng phân tích cổ phiếu và theo dõi bot giao dịch của chính mình
-qua web, Telegram và Zoom Team Chat. Chỉ người đã được chủ ứng dụng ghép đôi mới dùng được bot. Bot không gửi lệnh tới công ty chứng khoán.</p>
+qua web, Telegram và Zoom Team Chat. Chỉ người đã được chủ ứng dụng ghép đôi mới dùng được bot. Bot không đặt lệnh tới công ty chứng khoán.</p>
 <h2>2. Không phải tư vấn tài chính</h2><p>Mọi tín hiệu, phân tích AI và thông báo chỉ mang tính tham khảo, không phải khuyến nghị đầu tư.
 Kết quả quá khứ không bảo đảm tương lai; người dùng tự chịu trách nhiệm về quyết định của mình.</p>
 <h2>3. Giới hạn dịch vụ</h2><p>Dịch vụ phụ thuộc vào nguồn dữ liệu thị trường, Zoom, Telegram, nhà cung cấp AI và hạ tầng bên thứ ba;
@@ -170,7 +170,7 @@ Zoom gửi sự kiện huỷ cấp quyền, ứng dụng xoá ngay thông tin gh
 <h2>Cách 2: Gỡ ghép đôi</h2><p>Chủ ứng dụng gõ <code>/zoomxoa</code> trên Telegram để xoá thông tin ghép đôi Zoom.</p>
 <h2>Cách 3: Yêu cầu qua liên hệ</h2><p>Liên hệ {_contact(email, False)}, ghi rõ JID hoặc email Zoom. Không gửi mật khẩu hay mã OTP.
 Yêu cầu hợp lệ được xử lý trong tối đa 7 ngày.</p>
-<h2>Dữ liệu còn lại</h2><p>Nhật ký 20 request Zoom gần nhất được thay dần bằng request mới. Tin nhắn đã gửi trong Zoom nằm trên hệ thống
+<h2>Dữ liệu còn lại</h2><p>Nhật ký 20 yêu cầu Zoom gần nhất được thay dần bằng yêu cầu mới. Tin nhắn đã gửi trong Zoom nằm trên hệ thống
 của Zoom và cần xoá trực tiếp trong Zoom.</p>
 <div class="lang"><h1>Data Deletion</h1><p class="muted">Last updated: {UPDATED_EN}</p>
 <h2>Option 1: Uninstall (automatic)</h2><p>In Zoom: <b>Zoom App Marketplace → Manage → Added Apps → {APP_NAME} → Remove</b>.
@@ -375,7 +375,7 @@ def register(app, settings, zoom, *, guard, post_guard, notify=None, post=None) 
 
         def copy_btn(u: str) -> str:
             return (f'<button class="btn btn-ghost" type="button" style="padding:7px 12px;font-size:12px" '
-                    f'data-copy="{html.escape(u)}">Chép</button>')
+                    f'data-copy="{html.escape(u)}">Sao chép</button>')
 
         urls = [("OAuth Redirect URL", b + "/zoom/oauth/callback"), ("OAuth Allow List", b + "/zoom/oauth/callback"),
                 ("Bot endpoint URL (Development & Production)", b + "/webhook/zoom"),
@@ -389,16 +389,16 @@ def register(app, settings, zoom, *, guard, post_guard, notify=None, post=None) 
                   ("ZOOM_CLIENT_SECRET", bool(c and c.client_secret)), ("ZOOM_BOT_JID", bool(c and c.bot_jid)),
                   ("ZOOM_SECRET_TOKEN", bool(c and c.secret_token)), ("ZOOM_ACCOUNT_ID", bool(c and c.account_id)),
                   ("SUPPORT_EMAIL", bool(settings.support_email)),
-                  ("ZOOM_WEBHOOK_URL + ZOOM_WEBHOOK_TOKEN (tuỳ chọn)", bool(c and c.webhook_url and c.webhook_token))]
+                  ("ZOOM_WEBHOOK_URL + ZOOM_WEBHOOK_TOKEN (không bắt buộc)", bool(c and c.webhook_url and c.webhook_token))]
         check_rows = "".join(f'<div class="kv"><div><b>{k}</b></div><div>{chk(v)}</div></div>' for k, v in checks)
         state_rows = (
-            f'<div class="kv"><div><b>Đã cài vào Zoom (OAuth)</b><span class="muted small">{_when(inst.get("ts"))}</span></div>'
+            f'<div class="kv"><div><b>Đã cài đặt vào Zoom (OAuth)</b><span class="muted small">{_when(inst.get("ts"))}</span></div>'
             f"<div>{chk(inst)}</div></div>"
             f'<div class="kv"><div><b>JID đã ghép đôi</b><span class="muted small">'
-            f'{html.escape(((p.get("name") or "") + " " + (p.get("jid") or "chưa có")).strip())}</span></div>'
+            f'{html.escape(((p.get("name") or "") + " " + (p.get("jid") or "chưa ghép đôi")).strip())}</span></div>'
             f"<div>{chk(p.get('jid'))}</div></div>"
             f'<div class="kv"><div><b>Gửi thông báo tới</b><span class="muted small">'
-            f'{html.escape((c.to_jid + " (ZOOM_TO_JID)") if c and c.to_jid else ("JID đã ghép đôi" if p.get("jid") else "chưa có"))}'
+            f'{html.escape((c.to_jid + " (ZOOM_TO_JID)") if c and c.to_jid else ("tài khoản đã ghép đôi" if p.get("jid") else "chưa có nơi nhận"))}'
             f'{" · Incoming Webhook" if zoom and zoom.webhook_on else ""}</span></div><div>{chk(zoom and zoom.notify_on)}</div></div>'
             f'<div class="kv"><div><b>Nhận lệnh từ Zoom</b><span class="muted small">/webhook/zoom</span></div>'
             f"<div>{chk(zoom and zoom.commands_on)}</div></div>")
@@ -408,7 +408,7 @@ def register(app, settings, zoom, *, guard, post_guard, notify=None, post=None) 
         pend_html = ""
         if pend.get("jid") and pend.get("jid") != p.get("jid"):
             pend_html = (
-                f'<div class="box"><b>Có người vừa nhắn bot nhưng chưa được ghép đôi</b><br>'
+                f'<div class="box"><b>Một tài khoản vừa nhắn bot nhưng chưa được ghép đôi</b><br>'
                 f'{html.escape(pend.get("name") or "")} · <span class="url">{html.escape(pend["jid"])}</span> · '
                 f'{_when(pend.get("ts"))}'
                 '<form method="post" action="/zoom/pair" style="margin-top:12px">'
@@ -419,38 +419,38 @@ def register(app, settings, zoom, *, guard, post_guard, notify=None, post=None) 
             f'{html.escape(r["event"])}</b><span class="muted small">{html.escape(r.get("user") or "")} '
             f'{html.escape(r.get("cmd") or "")} — {html.escape(r["reason"])}</span></div><div>{chk(r["ok"])}</div></div>'
             for r in reqs) or (
-            '<p class="box">Chưa nhận được request nào từ Zoom, nghĩa là Zoom chưa gọi tới bot. Kiểm tra <b>Bot endpoint URL</b>'
-            " trong Features → Surface → Team Chat Subscription của đúng app này (bản Development khi Local Test), và bạn đang"
-            " nhắn đúng bot của app này chứ không phải bot OKX.</p>")
+            '<p class="box">Chưa nhận được yêu cầu nào từ Zoom. Vui lòng kiểm tra <b>Bot endpoint URL</b> trong'
+            " Features → Surface → Team Chat Subscription của đúng ứng dụng này (bản Development khi Local Test), và chắc chắn"
+            " bạn đang nhắn cho bot của ứng dụng này.</p>")
         steps = f"""<ol>
-<li>Basic Information → dán <b>OAuth Redirect URL</b> và <b>OAuth Allow List</b>.</li>
-<li>Features → Surface → bật <b>Team Chat</b> → Team Chat Subscription: dán <b>Bot endpoint URL</b>, slash command
-<code>{SLASH}</code>. Chép <b>Bot JID</b> (Development) vào <code>ZOOM_BOT_JID</code>.</li>
-<li>Features → Access → <b>Secret Token</b> → <code>ZOOM_SECRET_TOKEN</code>. Bật Event Subscription với URL ở trên, thêm sự kiện
-<i>App Deauthorized</i>, bấm <b>Validate</b>.</li>
-<li>Basic Information → App Credentials (Development) → <code>ZOOM_CLIENT_ID</code>, <code>ZOOM_CLIENT_SECRET</code>. Account ID lấy ở
+<li>Basic Information: khai báo <b>OAuth Redirect URL</b> và <b>OAuth Allow List</b>.</li>
+<li>Features → Surface: bật <b>Team Chat</b>; tại Team Chat Subscription khai báo <b>Bot endpoint URL</b> và slash command
+<code>{SLASH}</code>. Sao chép <b>Bot JID</b> (Development) vào <code>ZOOM_BOT_JID</code>.</li>
+<li>Features → Access: sao chép <b>Secret Token</b> vào <code>ZOOM_SECRET_TOKEN</code>. Bật Event Subscription với địa chỉ ở trên,
+thêm sự kiện <i>App Deauthorized</i> rồi chọn <b>Validate</b>.</li>
+<li>Basic Information → App Credentials (Development): sao chép vào <code>ZOOM_CLIENT_ID</code>, <code>ZOOM_CLIENT_SECRET</code>. Account ID lấy tại
 zoom.us/account → <code>ZOOM_ACCOUNT_ID</code>.</li>
 <li>Scopes: <code>imchat:bot</code> (Zoom tự thêm khi bật chatbot).</li>
-<li>Restart bot, rồi Local Test → <b>Add App Now</b> (hoặc nút dưới) → Allow → về trang callback báo thành công.</li>
-<li>Zoom → Team Chat → Apps → nhắn <code>trangthai</code> → Telegram báo JID → gõ <code>/zoompair &lt;JID&gt;</code> hoặc bấm
-“Ghép đôi” ở trên.</li></ol>
+<li>Khởi động lại bot, rồi vào Local Test → <b>Add App Now</b> (hoặc nút “Thêm vào Zoom”) → Allow; trang xác nhận sẽ báo cài đặt thành công.</li>
+<li>Trong Zoom → Team Chat → Apps, nhắn <code>trangthai</code>; Telegram sẽ báo JID của bạn. Gõ <code>/zoompair &lt;JID&gt;</code>
+hoặc chọn “Ghép đôi tài khoản này” ở trên.</li></ol>
 """
         script = """<script>document.querySelectorAll('[data-copy]').forEach(function(b){b.addEventListener('click',function(){
-try{navigator.clipboard.writeText(b.getAttribute('data-copy'));b.textContent='Đã chép';}catch(e){}});});</script>"""
+try{navigator.clipboard.writeText(b.getAttribute('data-copy'));b.textContent='Đã sao chép';}catch(e){}});});</script>"""
         body = (
             ui.hero("Cấu hình Zoom",
-                    'Dán các URL dưới đây vào app trên <a href="https://marketplace.zoom.us/user/build" target="_blank" '
-                    'rel="noopener">Zoom Marketplace</a>, rồi theo các bước bên dưới. <a href="/zoom">Tải lại</a>',
+                    'Sao chép các địa chỉ dưới đây vào ứng dụng trên <a href="https://marketplace.zoom.us/user/build" target="_blank" '
+                    'rel="noopener">Zoom Marketplace</a>, rồi thực hiện lần lượt các bước cài đặt. <a href="/zoom">Làm mới</a>',
                     '<a class="btn btn-primary" href="/zoom/install">Thêm vào Zoom (Local Test)</a>', eyebrow="Zoom Team Chat")
             + pend_html
             + '<div class="grid g2">'
             + ui.card("Trạng thái", state_rows)
-            + ui.card("Biến môi trường", check_rows, sub="✓ là đã đặt; giá trị không hiện ra")
+            + ui.card("Biến môi trường", check_rows, sub="✓ đã thiết lập · giá trị được ẩn")
             + "</div>"
             + '<div class="grid g2 mt">'
-            + ui.card("URL cần dán vào Marketplace", url_rows)
-            + '<div class="stack">' + ui.card("Request Zoom gần nhất", req_rows, sub="20 request gần nhất, mới nhất ở trên")
-            + ui.card("Các bước Local Test", steps) + "</div>"
+            + ui.card("Địa chỉ khai báo trên Marketplace", url_rows)
+            + '<div class="stack">' + ui.card("Yêu cầu Zoom gần nhất", req_rows, sub="20 yêu cầu gần nhất, mới nhất ở trên cùng")
+            + ui.card("Các bước cài đặt (Local Test)", steps) + "</div>"
             + "</div>" + script
         )
         return HTMLResponse(ui.page("Cấu hình Zoom", f"<style>{PUBLIC_CSS}</style>" + body, active="ai"))

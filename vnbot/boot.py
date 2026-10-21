@@ -42,7 +42,7 @@ class LateApp:
         logger.info("Web: the app is ready")
 
     def failed(self, error: str) -> None:
-        self.error = error or "lỗi không rõ"
+        self.error = error or "lỗi chưa xác định"
 
     async def __call__(self, scope, receive, send):
         if self.app is not None:
@@ -73,12 +73,12 @@ class LateApp:
             await _respond(send, status, body, "application/json")
             return
         if self.error:
-            page = _PAGE.format(refresh="", title="Khởi động lỗi",
-                                text=f"Bot không khởi động được: {html.escape(self.error)}. Xem log trên Botkeep.")
+            page = _PAGE.format(refresh="", title="Khởi động không thành công",
+                                text=f"Chi tiết: {html.escape(self.error)}. Vui lòng xem nhật ký (log) trên Botkeep.")
             await _respond(send, 500, page.encode(), "text/html; charset=utf-8")
             return
         page = _PAGE.format(refresh=f'<meta http-equiv="refresh" content="{self.retry}">', title="Đang khởi động",
-                            text="Bot đang nạp dữ liệu và thư viện, trang sẽ tự tải lại sau vài giây.")
+                            text="Hệ thống đang khởi động, trang sẽ tự tải lại sau giây lát.")
         await _respond(send, 503, page.encode(), "text/html; charset=utf-8",
                        [(b"retry-after", str(self.retry).encode())])
 

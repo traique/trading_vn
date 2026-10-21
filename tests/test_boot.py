@@ -14,7 +14,7 @@ def test_the_port_answers_while_starting_then_hands_over():
         health = client.get("/health")
         assert health.status_code == 200 and health.json() == {"ok": True, "booting": True}
         page = client.get("/")
-        assert page.status_code == 503 and page.headers["retry-after"] == "5" and "Đang khởi động" in page.text
+        assert page.status_code == 503 and page.headers["retry-after"] == "5" and "đang khởi động" in page.text
         assert client.post("/webhook/zoom", content=b"{}").status_code == 503     # Zoom retries later
 
         app = FastAPI()
@@ -31,7 +31,7 @@ def test_a_failed_start_is_shown_instead_of_a_silent_port():
     health = client.get("/health")
     assert health.status_code == 500 and "ModuleNotFoundError" in health.json()["error"]
     page = client.get("/bot")
-    assert page.status_code == 500 and "Khởi động lỗi" in page.text and "log" in page.text
+    assert page.status_code == 500 and "Khởi động không thành công" in page.text and "log" in page.text
 
 
 @pytest.mark.unit

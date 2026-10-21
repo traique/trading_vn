@@ -398,7 +398,7 @@ def test_wrong_passwords_lock_the_client_out_for_a_while(web):
         client.get("/", auth=("x", "guess"))
     locked = client.get("/")                                      # even the right password waits
     assert locked.status_code == 429 and int(locked.headers["Retry-After"]) > 0
-    assert "Sai mật khẩu quá nhiều lần" in locked.text
+    assert "Nhập sai mật khẩu quá nhiều lần" in locked.text
     assert client.post("/analyze", data={"ticker": "FPT"}).status_code == 429
     assert client.get("/health").status_code == 200
     now[0] += throttle.lockout + 1
@@ -438,7 +438,7 @@ def test_the_quick_page_does_not_show_exception_details(web, monkeypatch):
 
     monkeypatch.setattr(engine, "analyze", broken)
     page = client.post("/quick", data={"ticker": "FPT", "date": "2026-10-13"}).text
-    assert "Không tính được" in page and "secret" not in page
+    assert "Chưa tính được" in page and "secret" not in page
 
 
 @pytest.mark.unit
@@ -452,7 +452,7 @@ def test_a_server_error_page_hides_the_exception(settings, queue):  # noqa: F811
     client = TestClient(create_app(settings, queue, Watchlist(settings), trader=trader),
                         raise_server_exceptions=False)
     response = client.get("/bot", auth=("u", "s3cret"))
-    assert response.status_code == 500 and "secret" not in response.text and "Lỗi máy chủ" in response.text
+    assert response.status_code == 500 and "secret" not in response.text and "Máy chủ gặp sự cố" in response.text
 
 
 @pytest.mark.unit
@@ -462,12 +462,12 @@ def test_unknown_pages_and_bad_forms_get_the_vietnamese_error_page(web):
     assert missing.status_code == 404 and "Không tìm thấy trang" in missing.text
     assert missing.headers["X-Frame-Options"] == "DENY"
     bad = client.post("/analyze", data={})
-    assert bad.status_code == 422 and "Thiếu hoặc sai dữ liệu" in bad.text and "text/html" in bad.headers["content-type"]
+    assert bad.status_code == 422 and "Biểu mẫu thiếu thông tin" in bad.text and "text/html" in bad.headers["content-type"]
 
 
 @pytest.mark.unit
 def test_the_web_watchlist_is_capped(web, settings):  # noqa: F811
     _, client = web
     response = client.post("/watchlist", data={"codes": ",".join(["FPT"] * 31)})
-    assert "Tối đa 30" in response.text
+    assert "tối đa 30 mã" in response.text
     assert Watchlist(settings).get() == ["FPT", "HPG"]
