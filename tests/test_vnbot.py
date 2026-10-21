@@ -159,6 +159,49 @@ def test_the_home_page_lists_jobs_watchlist_and_providers(client):
 
 
 @pytest.mark.unit
+def test_the_ai_page_shows_budget_verdicts_alerts_and_channels(client, settings):
+    import json as _json
+
+    from vnbot import web as web_module
+    from vnbot.critic import CriticLog
+
+    log = CriticLog(settings.data_dir)
+    result = SimpleNamespace(symbol="HPG", action="BUY", price=100.0, stop_price=95.0, target_price=110.0)
+    log.add("2026-10-01", result, {"verdict": "REJECT", "confidence": 70, "reason": "VNINDEX <yếu>", "risks": []})
+    log.settle(lambda code, day: [{"High": 101, "Low": 94, "Close": 95}])
+    (settings.data_dir / "intraday_alerts.json").write_text(_json.dumps(
+        {"day": web_module.today_vn(), "keys": ["k"], "alerts": [{"at": "10:15", "text": "⛔ FPT chạm stop"}]}), encoding="utf-8")
+    page = client.get("/ai").text
+    assert "AI &amp; cảnh báo" in page and "Hạn mức AI hôm nay" in page
+    assert "HPG" in page and "phản đối" in page and "-1.00R" in page and "VNINDEX &lt;yếu&gt;" in page
+    assert "100%" in page                                      # the one rejected BUY lost: the AI was right
+    assert "10:15" in page and "FPT chạm stop" in page
+    assert "Zoom · nhận lệnh" in page
+
+
+@pytest.mark.unit
+def test_the_web_critic_asks_once_and_shows_the_verdict(client, settings, monkeypatch):
+    from tradingagents.quant import engine
+    from vnbot import critic
+
+    result = SimpleNamespace(symbol="FPT", action="BUY", confidence=0.8, price=100.0, stop_price=95.0,
+                             target_price=110.0, deterministic_summary="FPT - BUY", reasons=[], scenarios=[])
+    monkeypatch.setattr(engine, "analyze", lambda code, day: result)
+    monkeypatch.setattr(critic, "bars_after", lambda code, day: [])
+    calls = []
+
+    class LLM:
+        def invoke(self, messages):
+            calls.append(messages)
+            return SimpleNamespace(content='{"verdict": "AGREE", "confidence": 66, "reason": "dòng tiền tốt"}')
+
+    monkeypatch.setattr(critic, "default_llm", lambda settings: LLM())
+    page = client.post("/critic", data={"ticker": "fpt", "date": "2026-10-13"}).text
+    assert len(calls) == 1 and "AI ĐỒNG Ý 66%: dòng tiền tốt" in page and "FPT - BUY" in page
+    assert client.post("/critic", data={"ticker": "VNINDEX"}, follow_redirects=False).status_code == 303
+
+
+@pytest.mark.unit
 def test_a_web_request_queues_a_job_and_shows_it(client, queue):
     response = client.post("/analyze", data={"ticker": "fpt", "date": "2026-10-13"}, follow_redirects=False)
     assert response.status_code == 303

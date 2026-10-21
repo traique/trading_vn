@@ -63,6 +63,14 @@ def exchange(code: str) -> str | None:
         return None
 
 
+def read_alerts(path: Path, day: str) -> list[dict]:
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    return list(data.get("alerts", [])) if data.get("day") == day else []
+
+
 class IntradayMonitor:
     def __init__(self, settings, trader, notify: Callable[[str], None], *,
                  price=live_price, index_change=vnindex_change, exchange_of=exchange):
@@ -83,8 +91,13 @@ class IntradayMonitor:
             return set()
         return set(data.get("keys", [])) if data.get("day") == day else set()
 
-    def _remember(self, day: str, keys: set[str]) -> None:
-        write_text_atomic(self.path, json.dumps({"day": day, "keys": sorted(keys)}))
+    def _remember(self, day: str, keys: set[str], new: list[str], at: str) -> None:
+        log = self.today(day) + [{"at": at, "text": text} for text in new]
+        write_text_atomic(self.path, json.dumps({"day": day, "keys": sorted(keys), "alerts": log}, ensure_ascii=False))
+
+    def today(self, day: str) -> list[dict]:
+        """Today's alerts as {at: "HH:MM", text}, oldest first (for the web page)."""
+        return read_alerts(self.path, day)
 
     # ── what to watch ──
     def _books(self, day: str):
@@ -161,8 +174,9 @@ class IntradayMonitor:
                     alerts.append((f"vni:{level:g}", f"📉 VNINDEX {change:+.2f}% so với phiên trước (ngưỡng −{level:g}%)"))
         new = [(k, text) for k, text in alerts if k not in sent]
         if new:
-            self._remember(day, sent | {k for k, _ in new})
-            self.notify(f"🔔 Cảnh báo trong phiên {vn_rules.now_vn().strftime('%H:%M')} (không gọi AI)\n"
+            at = vn_rules.now_vn().strftime("%H:%M")
+            self._remember(day, sent | {k for k, _ in new}, [text for _, text in new], at)
+            self.notify(f"🔔 Cảnh báo trong phiên {at} (không gọi AI)\n"
                         + "\n".join(text for _, text in new)
                         + "\nBot không tự đặt lệnh; các tài khoản ảo vẫn khớp theo nến ngày sau 15:05.")
         return [text for _, text in new]
