@@ -24,10 +24,9 @@ _PAGE = """<!doctype html><html lang="vi"><head><meta charset="utf-8">
 body{{margin:0;min-height:100vh;display:grid;place-items:center;background:var(--bg);color:var(--ink);
 font:15px/1.6 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;padding:16px;box-sizing:border-box}}
 .c{{background:var(--card);border:1px solid var(--line);border-radius:20px;padding:28px 26px;max-width:420px;text-align:center}}
-.m{{width:44px;height:44px;border-radius:12px;margin:0 auto 14px;display:grid;place-items:center;font:700 18px Georgia,serif;
-color:#1A1505;background:linear-gradient(135deg,var(--gold),var(--gold2))}}
+.m{{display:block;width:124px;height:88px;margin:0 auto 10px;object-fit:contain}}
 h1{{font:600 22px/1.3 Georgia,serif;margin:0 0 6px}}p{{color:var(--mut);margin:0}}</style></head>
-<body><div class="c"><div class="m">T</div><h1>{title}</h1><p>{text}</p></div></body></html>"""
+<body><div class="c"><img class="m" src="/static/logo.png" alt="LCTA"><h1>{title}</h1><p>{text}</p></div></body></html>"""
 
 
 class LateApp:
@@ -59,7 +58,15 @@ class LateApp:
                     return
         if scope["type"] != "http":
             return
-        if scope.get("path") == "/health":
+        path = scope.get("path", "")
+        if path.startswith("/static/"):
+            from vnbot import ui  # light: no framework import
+
+            name = path.rsplit("/", 1)[-1]
+            if name in ui.STATIC_FILES:
+                await _respond(send, 200, (ui.STATIC_DIR / name).read_bytes(), "image/png")
+                return
+        if path == "/health":
             status = 500 if self.error else 200
             body = json.dumps({"ok": not self.error, "booting": not self.error,
                                **({"error": self.error} if self.error else {})}).encode()

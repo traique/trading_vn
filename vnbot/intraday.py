@@ -73,8 +73,9 @@ def read_alerts(path: Path, day: str) -> list[dict]:
 
 class IntradayMonitor:
     def __init__(self, settings, trader, notify: Callable[[str], None], *,
-                 price=live_price, index_change=vnindex_change, exchange_of=exchange):
+                 price=live_price, index_change=vnindex_change, exchange_of=exchange, switches=None):
         self.settings, self.trader, self.notify = settings, trader, notify
+        self.switches = switches            # vnbot.channels.Switches: "intraday" on the web page
         self.price, self.index_change, self.exchange_of = price, index_change, exchange_of
         self.path = Path(settings.data_dir) / "intraday_alerts.json"
         self._last_check = 0.0
@@ -186,6 +187,9 @@ class IntradayMonitor:
 
         now = vn_rules.now_vn()
         if vn_rules.session_phase(now) not in ACTIVE_PHASES:
+            return
+        on = self.switches.on("intraday") if self.switches is not None else self.settings.intraday_alerts
+        if not on:
             return
         if time.time() - self._last_check < self.settings.intraday_interval_min * 60:
             return

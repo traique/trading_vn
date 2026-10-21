@@ -61,6 +61,7 @@ include = ["tradingagents*", "cli*", "vnbot*"]
 [tool.setuptools.package-data]
 cli = ["static/*"]
 tradingagents = ["assets/*.svg"]
+vnbot = ["static/*.png"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -32,7 +32,7 @@ EXTRA = {
     "LICENSE": "LICENSE",
 }
 SKIP_DIRS = {"__pycache__"}
-KEEP_SUFFIXES = {".py", ".svg"}
+KEEP_SUFFIXES = {".py", ".svg", ".png"}
 
 
 def collect() -> list[tuple[Path, str]]:

@@ -154,7 +154,12 @@ Các tài khoản ảo vẫn khớp lệnh theo nến ngày sau 15:05 (đúng nh
 - 🛒 lệnh mua giới hạn hôm nay của Quant Engine đang trong vùng mua, hoặc ⚠️ giá đã dưới stop dự kiến (nên bỏ lệnh);
 - 📉 VNINDEX giảm `INTRADAY_VNI_DROP_PCT` % (mặc định 2) và gấp đôi mức đó so với phiên trước.
 
-Mỗi cảnh báo gửi một lần mỗi ngày, kể cả khi khởi động lại (`data/intraday_alerts.json`). Giá đọc cách nhau vài phút nên có thể bỏ lỡ một cú xuyên stop rất ngắn. Tắt: `INTRADAY_ALERTS=0`.
+Mỗi cảnh báo gửi một lần mỗi ngày, kể cả khi khởi động lại (`data/intraday_alerts.json`). Giá đọc cách nhau vài phút nên có thể bỏ lỡ một cú xuyên stop rất ngắn. Bật/tắt bằng công tắc trên trang **AI & cảnh báo** (`INTRADAY_ALERTS` chỉ là giá trị mặc định).
+
+### Bật/tắt kênh thông báo và đổi vốn tài khoản ảo trên web
+
+- Trang **AI & cảnh báo** (`/ai`), thẻ **Kênh thông báo**: công tắc bật/tắt thật cho *Telegram · thông báo* (báo cáo, AI phản biện, cảnh báo; lệnh Telegram vẫn được trả lời khi tắt), *Zoom · thông báo*, *Zoom · nhận lệnh* và *Cảnh báo trong phiên*. Lưu trong `data/channels.json`, giữ qua lần khởi động lại. Kênh chưa cấu hình hiện "chưa cấu hình".
+- Trang **Bot giao dịch** (`/bot`), thẻ **Vốn tài khoản ảo**: nhập vốn mới (tối thiểu 10 triệu), chọn tài khoản (Phòng thủ, Quant Engine, Động lượng), đánh dấu ô xác nhận rồi bấm **Đổi vốn**. Tài khoản được chọn bắt đầu lại từ đầu với vốn mới từ lần chạy phiên tới (bấm "Chạy phiên ngay" để bắt đầu luôn); sổ cũ được giữ lại thành `data/trading/<file>.reset-<thời điểm>`. Vốn mới lưu trong `data/trading/paper_capital.json` và thay cho `PAPER_CAPITAL`. Không đổi được khi bot đang chạy phiên.
 
 ### Zoom Team Chat
 

@@ -18,6 +18,12 @@ from __future__ import annotations
 
 import html
 import json
+from pathlib import Path
+
+STATIC_DIR = Path(__file__).with_name("static")
+STATIC_FILES = ("logo.png", "favicon.png")
+LOGO = '<img class="logo" src="/static/logo.png" alt="LCTA" width="62" height="44">'
+FAVICON = '<link rel="icon" type="image/png" href="/static/favicon.png">'
 
 FONTS = (
     '<link rel="preconnect" href="https://fonts.googleapis.com">'
@@ -87,9 +93,7 @@ a{color:var(--brand-text);text-decoration:none}a:hover{text-decoration:underline
 .top-in{max-width:1120px;margin:0 auto;padding:12px 16px;display:flex;align-items:center;gap:16px}
 .brand{display:flex;align-items:center;gap:12px;color:var(--ink)}
 .brand:hover{text-decoration:none}
-.mark{width:36px;height:36px;border-radius:11px;display:grid;place-items:center;color:var(--gold-ink);
-  font:700 17px/1 "Playfair Display",Georgia,serif;background:linear-gradient(135deg,var(--gold) 0%,var(--gold-2) 100%);
-  box-shadow:0 6px 18px -6px rgba(184,150,62,.6),inset 0 1px 0 rgba(255,255,255,.35)}
+.logo{width:62px;height:44px;object-fit:contain;flex:none;filter:drop-shadow(0 4px 10px rgba(184,150,62,.25))}
 .brand-name{font:600 17px/1.1 "Playfair Display",Georgia,serif;letter-spacing:.01em}
 .brand small{display:block;font:600 10px/1.4 "Be Vietnam Pro",sans-serif;color:var(--muted);letter-spacing:.18em;
   text-transform:uppercase;margin-top:3px}
@@ -159,6 +163,23 @@ input.ticker{text-transform:uppercase;font-weight:700;letter-spacing:.08em;font-
 .btn-ghost:hover{border-color:var(--gold);color:var(--brand-text);text-decoration:none}
 .btn-sa{background:var(--ink);color:var(--bg)}.btn-sa:hover{filter:brightness(1.15);text-decoration:none}
 .btn[disabled]{opacity:.55;cursor:not-allowed}
+/* on/off switch */
+.switch{display:inline-flex;align-items:center;gap:10px;border:0;background:none;padding:4px 0;cursor:pointer;
+  font:600 13px/1 "Be Vietnam Pro",sans-serif;color:var(--muted)}
+.switch .knob{position:relative;width:44px;height:26px;border-radius:999px;background:var(--surface-3);
+  border:1px solid var(--line-strong);transition:background .2s,border-color .2s;flex:none}
+.switch .knob::after{content:"";position:absolute;top:2px;left:2px;width:20px;height:20px;border-radius:50%;
+  background:var(--surface);box-shadow:0 1px 3px rgba(0,0,0,.3);transition:transform .2s}
+.switch.on{color:var(--up)}
+.switch.on .knob{background:linear-gradient(135deg,var(--gold),var(--gold-2));border-color:transparent}
+.switch.on .knob::after{transform:translateX(18px)}
+.switch:focus-visible .knob{box-shadow:0 0 0 4px var(--brand-soft)}
+.switch .st{min-width:24px;text-align:left}
+.checks{display:flex;flex-wrap:wrap;gap:8px 18px;margin:14px 0 8px}
+label.check{display:inline-flex;align-items:center;gap:8px;font-size:14px;color:var(--ink-2);cursor:pointer}
+label.check input{width:18px;height:18px;padding:0;accent-color:var(--gold);flex:none}
+label.check.warn{display:flex;align-items:flex-start;color:var(--warn);font-size:13px;margin-top:6px}
+label.check.warn input{margin-top:1px}
 /* badges and chips */
 .badge{display:inline-flex;align-items:center;gap:6px;padding:3px 10px;border-radius:999px;
   font:600 11.5px/1.7 "Be Vietnam Pro",sans-serif;letter-spacing:.04em;white-space:nowrap}
@@ -263,9 +284,9 @@ def page(title: str, body: str, *, active: str = "", refresh: int | None = None,
         '<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">'
         '<meta name="theme-color" content="#F6F4EF" media="(prefers-color-scheme: light)">'
         '<meta name="theme-color" content="#0B0D12" media="(prefers-color-scheme: dark)">'
-        f"{meta}<title>{e(title)} · TradingAgents VN</title>{THEME_BOOT}{FONTS}<style>{STYLE}</style></head><body>"
+        f"{meta}<title>{e(title)} · TradingAgents VN</title>{FAVICON}{THEME_BOOT}{FONTS}<style>{STYLE}</style></head><body>"
         '<header class="top"><div class="top-in">'
-        '<a class="brand" href="/"><span class="mark">T</span><span class="brand-name">TradingAgents VN'
+        f'<a class="brand" href="/">{LOGO}<span class="brand-name">TradingAgents VN'
         "<small>HOSE · HNX · UPCoM</small></span></a>"
         f'<nav class="nav">{links}</nav>'
         f'<button class="icon-btn" id="theme-toggle" type="button" aria-label="Đổi giao diện sáng/tối">{MOON}{SUN}</button>'

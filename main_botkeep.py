@@ -64,6 +64,7 @@ def _boot(web: LateApp) -> None:
 
 def _start():
     from tradingagents.llm_clients.fallback_client import configured_order
+    from vnbot.channels import Switches
     from vnbot.intraday import IntradayMonitor
     from vnbot.jobs import JobQueue, prune_cache
     from vnbot.service import DailyScheduler, Watchlist
@@ -86,6 +87,8 @@ def _start():
     jobs = JobQueue(SETTINGS)
     watchlist = Watchlist(SETTINGS)
     bot = TelegramBot(SETTINGS, jobs, watchlist)
+    switches = Switches(SETTINGS.data_dir, {"intraday": SETTINGS.intraday_alerts})   # the switches on /ai
+    bot.switches = switches
     zoom = ZoomChannel(state_path=SETTINGS.data_dir / "zoom_state.json")
     zoom.public_url = SETTINGS.public_url
     if zoom.enabled:
@@ -99,14 +102,16 @@ def _start():
     jobs.start()
     bot.start()
     DailyScheduler(SETTINGS, jobs, watchlist, bot=trader, notify=bot.broadcast).start()
-    if SETTINGS.intraday_alerts and SETTINGS.trade_mode != "off":
-        IntradayMonitor(SETTINGS, trader, bot.broadcast).start()
-        logging.info("Intraday alerts: every %d min during the session (no AI)", SETTINGS.intraday_interval_min)
+    if SETTINGS.trade_mode != "off":
+        # Always running: the switch on /ai (default INTRADAY_ALERTS) turns the alerts on and off.
+        IntradayMonitor(SETTINGS, trader, bot.broadcast, switches=switches).start()
+        logging.info("Intraday alerts: %s, every %d min during the session (no AI)",
+                     "on" if switches.on("intraday") else "off", SETTINGS.intraday_interval_min)
     logging.info("Trading bot: mode %s, calibration %s, runs daily at %s (Vietnam time); watchlist report at %s",
                  SETTINGS.trade_mode, "on" if SETTINGS.calibrate else "off", SETTINGS.trade_time,
                  SETTINGS.daily_report_time)
 
-    return create_app(SETTINGS, jobs, watchlist, trader=trader, zoom=zoom)
+    return create_app(SETTINGS, jobs, watchlist, trader=trader, zoom=zoom, switches=switches)
 
 
 if __name__ == "__main__":

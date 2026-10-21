@@ -82,10 +82,10 @@ def public_page(title: str, body: str, current: str = "") -> str:
     return (
         '<!doctype html><html lang="vi"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">'
-        f"<title>{html.escape(title)} · {APP_NAME}</title>{ui.THEME_BOOT}{ui.FONTS}"
+        f"<title>{html.escape(title)} · {APP_NAME}</title>{ui.FAVICON}{ui.THEME_BOOT}{ui.FONTS}"
         f"<style>{ui.STYLE}{PUBLIC_CSS}</style></head><body>"
         '<header class="top"><div class="top-in">'
-        f'<a class="brand" href="/docs"><span class="mark">T</span><span class="brand-name">{APP_NAME}'
+        f'<a class="brand" href="/docs">{ui.LOGO}<span class="brand-name">{APP_NAME}'
         "<small>Zoom Team Chat</small></span></a>"
         f'<nav class="pubnav">{nav}</nav>'
         f'<button class="icon-btn" id="theme-toggle" type="button" aria-label="Đổi giao diện sáng/tối">{ui.MOON}{ui.SUN}</button>'
@@ -434,9 +434,7 @@ zoom.us/account → <code>ZOOM_ACCOUNT_ID</code>.</li>
 <li>Restart bot, rồi Local Test → <b>Add App Now</b> (hoặc nút dưới) → Allow → về trang callback báo thành công.</li>
 <li>Zoom → Team Chat → Apps → nhắn <code>trangthai</code> → Telegram báo JID → gõ <code>/zoompair &lt;JID&gt;</code> hoặc bấm
 “Ghép đôi” ở trên.</li></ol>
-<div class="box"><b>Chỉ muốn nhận thông báo bằng app chatbot của bot OKX?</b> Điền cùng <code>ZOOM_CLIENT_ID</code>,
-<code>ZOOM_CLIENT_SECRET</code>, <code>ZOOM_BOT_JID</code>, <code>ZOOM_ACCOUNT_ID</code> như bot OKX và đặt <code>ZOOM_TO_JID</code> =
-JID bot OKX đang ghép đôi (<code>/zoomstatus</code> trên Telegram của bot OKX). Không cần các bước trên: lệnh gõ vào app đó vẫn tới bot OKX.</div>"""
+"""
         script = """<script>document.querySelectorAll('[data-copy]').forEach(function(b){b.addEventListener('click',function(){
 try{navigator.clipboard.writeText(b.getAttribute('data-copy'));b.textContent='Đã chép';}catch(e){}});});</script>"""
         body = (

@@ -52,8 +52,17 @@ _T2_BADGE = '<span class="badge b-none">chờ T+2</span>'
 _TUNED_BADGE = '<span class="badge b-ok">đã chỉnh</span>'
 _CHANGED_BADGE = '<span class="badge b-ok">đổi</span> '
 _KEPT_BADGE = '<span class="badge b-none">giữ nguyên</span>'
-_ON_BADGE = '<span class="badge b-ok">bật</span>'
-_OFF_BADGE = '<span class="badge b-none">tắt</span>'
+_UNSET_BADGE = '<span class="badge b-none">chưa cấu hình</span>'
+
+
+def _switch_form(key: str, on: bool) -> str:
+    """An on/off switch that posts to /channels/<key> (a form: works without JavaScript)."""
+    label = "Đang bật, bấm để tắt" if on else "Đang tắt, bấm để bật"
+    return (f'<form method="post" action="/channels/{key}" style="margin:0;display:inline-flex">'
+            f'<input type="hidden" name="on" value="{0 if on else 1}">'
+            f'<button class="switch{" on" if on else ""}" type="submit" role="switch" aria-checked="{"true" if on else "false"}" '
+            f'aria-label="{label}" title="{label}"><span class="knob"></span>'
+            f'<span class="st">{"Bật" if on else "Tắt"}</span></button></form>')
 
 
 # Module level: the dependency annotations below are strings (postponed
@@ -231,6 +240,27 @@ def _run_time(trader) -> str:
     return max(trader.settings.trade_time, MIN_TRADE_TIME)
 
 
+def _capital_card(trader) -> str:
+    """The form that sets the paper books' capital (each chosen book starts over)."""
+    current = trader.paper_capital()
+    boxes = "".join(
+        f'<label class="check"><input type="checkbox" name="books" value="{key}" checked> {html.escape(name)}</label>'
+        for key, name in trader.BOOK_NAMES.items())
+    form = f"""
+<form method="post" action="/bot/capital">
+  <div class="row">
+    <div class="fld" style="flex:1 1 220px"><label class="f" for="capital">Vốn mỗi tài khoản (đồng)</label>
+      <input id="capital" name="capital" inputmode="numeric" value="{ui.money(current)}" required></div>
+    <button class="btn btn-primary" type="submit">Đổi vốn</button>
+  </div>
+  <div class="checks">{boxes}</div>
+  <label class="check warn"><input type="checkbox" name="confirm" value="1" required> Tôi hiểu: tài khoản được chọn
+  bắt đầu lại từ đầu với vốn mới (sổ cũ được giữ lại trong data/trading).</label>
+</form>"""
+    return ui.card("Vốn tài khoản ảo", form,
+                   sub=f"Đang dùng {ui.money(current)} đồng cho tài khoản mới · tối thiểu 10 triệu", cls="accent-gold")
+
+
 def _bot_page(trader, msg: str = "") -> str:
     from tradingagents.quant import params as qp
     from tradingagents.trading import calibrate as cal
@@ -253,6 +283,7 @@ def _bot_page(trader, msg: str = "") -> str:
     parts.append(ui.card("So sánh ba chiến lược", _chart(trader),
                          sub="NAV chỉ số hoá về 100 tại phiên " + html.escape(base or "đầu tiên")
                              + " (phiên đầu tiên chung của ba tài khoản), cùng VNINDEX"))
+    parts.append('<div class="mt">' + _capital_card(trader) + "</div>")
     basket_html = ('<div class="chips">' + "".join(f'<span class="chip">{html.escape(s)}</span>' for s in basket) + "</div>"
                    if basket else "tiền mặt")
     current = qp.active()
@@ -302,8 +333,13 @@ def _bot_page(trader, msg: str = "") -> str:
     return "".join(parts)
 
 
-def create_app(settings: Settings, jobs: JobQueue, watchlist: Watchlist, trader=None, zoom=None) -> FastAPI:
+def create_app(settings: Settings, jobs: JobQueue, watchlist: Watchlist, trader=None, zoom=None,
+               switches=None) -> FastAPI:
+    from vnbot.channels import Switches
+
     app = FastAPI(title="TradingAgents VN", docs_url=None, redoc_url=None, openapi_url=None)
+    if switches is None:
+        switches = Switches(settings.data_dir, {"intraday": settings.intraday_alerts})
 
     @app.middleware("http")
     async def security_headers(request: Request, call_next):
@@ -358,6 +394,14 @@ def create_app(settings: Settings, jobs: JobQueue, watchlist: Watchlist, trader=
     def health() -> JSONResponse:
         return JSONResponse({"ok": True, "time": time.time()})
 
+    @app.get("/static/{name}")
+    def static_file(name: str):
+        """The logo and favicon (public: the Zoom pages show them too)."""
+        if name not in ui.STATIC_FILES:
+            raise HTTPException(404, "Không tìm thấy trang.")
+        return FileResponse(ui.STATIC_DIR / name, media_type="image/png",
+                            headers={"Cache-Control": "public, max-age=86400"})
+
     async def zoom_webhook(request: Request) -> JSONResponse:
         """Zoom chatbot events (Bot endpoint, Event notification and Deauthorization endpoint).
         Signed by Zoom (HMAC), no password; the last requests are kept for the /zoom page."""
@@ -388,6 +432,9 @@ def create_app(settings: Settings, jobs: JobQueue, watchlist: Watchlist, trader=
             return JSONResponse({"ok": True})
         if not zoom.commands_on:
             return JSONResponse({"error": "zoom commands are off"}, status_code=404)
+        if not switches.on("zoom_commands"):
+            zoom.record(event, True, "bỏ qua: nhận lệnh Zoom đang tắt trên trang web", data)
+            return JSONResponse({"ok": True, "ignored": "zoom commands switched off"})
         zoom.handle(data)
         return JSONResponse({"ok": True})
 
@@ -397,7 +444,7 @@ def create_app(settings: Settings, jobs: JobQueue, watchlist: Watchlist, trader=
     from vnbot import pages
 
     pages.register(app, settings, zoom, guard=guard, post_guard=post_guard,
-                   notify=(zoom.alert_owner if zoom is not None else None))
+                   notify=getattr(zoom, "alert_owner", None))
 
     critic_llm: list = []        # the provider chain, built on the first web /critic
 
@@ -564,14 +611,17 @@ quét {html.escape(scope)} cùng watchlist, các mã mạnh nhất được AI p
             ("Cảnh báo hôm nay", str(len(alerts)), "trong phiên"),
         ])
         channels = [
-            ("Telegram", settings.telegram_token != "", "báo cáo, AI phản biện, cảnh báo, lệnh"),
-            ("Zoom · thông báo", bool(zoom and zoom.notify_on), "Incoming Webhook hoặc chatbot tới ZOOM_TO_JID"),
-            ("Zoom · nhận lệnh", bool(zoom and zoom.commands_on), "/webhook/zoom (app chatbot riêng)"),
-            ("Cảnh báo trong phiên", settings.intraday_alerts, f"mỗi {settings.intraday_interval_min} phút"),
+            ("telegram", "Telegram · thông báo", settings.telegram_token != "",
+             "báo cáo hằng ngày, AI phản biện, cảnh báo (lệnh Telegram vẫn trả lời khi tắt)"),
+            ("zoom_notify", "Zoom · thông báo", bool(zoom and zoom.notify_on),
+             "Incoming Webhook hoặc chatbot tới tài khoản đã ghép đôi"),
+            ("zoom_commands", "Zoom · nhận lệnh", bool(zoom and zoom.commands_on), "lệnh gõ trong Zoom (/webhook/zoom)"),
+            ("intraday", "Cảnh báo trong phiên", trader is not None and settings.trade_mode != "off",
+             f"mỗi {settings.intraday_interval_min} phút trong giờ khớp lệnh, không gọi AI"),
         ]
-        chrow = [f'<tr><td><b>{name}</b><div class="muted small">{html.escape(note)}</div></td>'
-                 f"<td>{_ON_BADGE if on else _OFF_BADGE}</td></tr>"
-                 for name, on, note in channels]
+        chrow = [f'<tr><td><b>{label}</b><div class="muted small">{html.escape(note)}</div></td>'
+                 f"<td class='num'>{_switch_form(key, switches.on(key)) if ready else _UNSET_BADGE}</td></tr>"
+                 for key, label, ready, note in channels]
         body = (
             ui.hero("AI & cảnh báo",
                     "AI chỉ được hỏi khi đáng hỏi: mỗi mã một lượt, trong hạn mức ngày. Bot ghi lại mọi lần AI phản biện "
@@ -671,6 +721,28 @@ quét {html.escape(scope)} cùng watchlist, các mã mạnh nhất được AI p
         if trader is None or settings.trade_mode == "off":
             raise HTTPException(404, "Bot giao dịch đang tắt (TRADE_MODE=off).")
         return RedirectResponse(f"/bot?msg={quote(trader.start_run())}", status_code=303)
+
+    @app.post("/bot/capital", dependencies=post_guard)
+    def bot_capital(books: Annotated[list[str] | None, Form()] = None, capital: str = Form(""), confirm: str = Form("")):
+        if trader is None or settings.trade_mode == "off":
+            raise HTTPException(404, "Bot giao dịch đang tắt (TRADE_MODE=off).")
+        try:
+            if confirm != "1":
+                raise ValueError("Đánh dấu ô xác nhận: các tài khoản được chọn sẽ bắt đầu lại từ đầu.")
+            amount = float("".join(ch for ch in capital if ch.isdigit()) or 0)
+            msg = trader.reset_paper(amount, books or [])
+        except ValueError as exc:
+            msg = f"⚠️ {exc}"
+        return RedirectResponse(f"/bot?msg={quote(msg)}", status_code=303)
+
+    @app.post("/channels/{name}", dependencies=post_guard)
+    def channel_switch(name: str, on: str = Form("1")):
+        try:
+            switches.set(name, on == "1")
+        except ValueError as exc:
+            raise HTTPException(404, str(exc)) from None
+        logger.info("Web: channel %s switched %s", name, "on" if on == "1" else "off")
+        return RedirectResponse("/ai#kenh", status_code=303)
 
     @app.get("/jobs/{job_id}", dependencies=[Depends(guard)])
     def job_page(job_id: str) -> HTMLResponse:

@@ -80,6 +80,10 @@ def _fmt(value: float | None) -> str:
     return f"{value:,.0f}".replace(",", ".")
 
 
+def _vnd(value: float) -> str:
+    return f"{value:,.0f}".replace(",", ".") + " đồng"
+
+
 def _bn(value: float) -> str:
     return f"{value / 1e6:,.1f} tr".replace(",", "X").replace(".", ",").replace("X", ".")
 
@@ -334,21 +338,63 @@ class TradingBot:
     def factor_path(self) -> Path:
         return self.dir / "paper_factor.json"
 
+    BOOK_FILES = {"factor": "paper_factor.json", "engine": "paper.json", "momentum": "paper_momentum.json"}
+    BOOK_NAMES = {"factor": "Phòng thủ", "engine": "Quant Engine", "momentum": "Động lượng"}
+    MIN_CAPITAL, MAX_CAPITAL = 10_000_000, 1_000_000_000_000
+
+    def paper_capital(self) -> float:
+        """The starting cash of a new paper book: set on the web page, else PAPER_CAPITAL."""
+        try:
+            value = float(json.loads((self.dir / "paper_capital.json").read_text(encoding="utf-8"))["capital"])
+        except (OSError, ValueError, KeyError, TypeError):
+            return self.settings.paper_capital
+        return value if self.MIN_CAPITAL <= value <= self.MAX_CAPITAL else self.settings.paper_capital
+
+    def reset_paper(self, capital: float, books: list[str]) -> str:
+        """Start the chosen paper books again with ``capital`` (the web page's form).
+
+        A book's history cannot be rescaled honestly (lots, ticks and fees depend on the
+        cash), so it starts over: its file is kept as ``<file>.reset-<time>`` and a new book
+        trades from the next run (the latest session, no backfill). Refused during a run."""
+        chosen = [b for b in books if b in self.BOOK_FILES]
+        if not chosen:
+            raise ValueError("Chọn ít nhất một tài khoản ảo để đổi vốn.")
+        if not self.MIN_CAPITAL <= capital <= self.MAX_CAPITAL:
+            raise ValueError(f"Vốn phải từ {_vnd(self.MIN_CAPITAL)} đến {_vnd(self.MAX_CAPITAL)}.")
+        if not self._lock.acquire(blocking=False):
+            raise ValueError("Bot đang chạy phiên, thử lại sau ít phút.")
+        try:
+            if self._running.is_set():
+                raise ValueError("Bot đang chạy phiên, thử lại sau ít phút.")
+            stamp = _now_vn().strftime("%Y%m%d-%H%M%S")
+            for book in chosen:
+                path = self.dir / self.BOOK_FILES[book]
+                if path.exists():
+                    path.rename(path.with_name(f"{path.name}.reset-{stamp}"))
+            self._write_json("paper_capital.json", {"capital": capital, "at": _now_vn().isoformat(timespec="minutes"),
+                                                    "books": chosen})
+        finally:
+            self._lock.release()
+        names = ", ".join(self.BOOK_NAMES[b] for b in chosen)
+        logger.info("Paper books %s restarted with %.0f VND", ",".join(chosen), capital)
+        return (f"Đã đặt vốn {_vnd(capital)} cho {names}. Tài khoản bắt đầu lại từ phiên chạy tới "
+                "(bấm “Chạy phiên ngay” để bắt đầu luôn); sổ cũ được giữ lại trong thư mục data/trading.")
+
     def factor_book(self):
         from tradingagents.trading.ledger import Ledger
 
-        return Ledger.load(self.factor_path, self.settings.paper_capital, fresh_on_error=True)
+        return Ledger.load(self.factor_path, self.paper_capital(), fresh_on_error=True)
 
     def momentum_book(self):
         from tradingagents.trading.ledger import Ledger
 
         # A damaged paper book is moved aside (kept) and restarted.
-        return Ledger.load(self.momentum_path, self.settings.paper_capital, fresh_on_error=True)
+        return Ledger.load(self.momentum_path, self.paper_capital(), fresh_on_error=True)
 
     def paper(self):
         from tradingagents.trading.ledger import Ledger
 
-        return Ledger.load(self.paper_path, self.settings.paper_capital, fresh_on_error=True)
+        return Ledger.load(self.paper_path, self.paper_capital(), fresh_on_error=True)
 
     def real(self):
         """The real book; raises LedgerLoadError when its file is damaged (never emptied).

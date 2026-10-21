@@ -162,6 +162,7 @@ class TelegramBot:
         self.trader = None   # vnbot.trader.TradingBot, set by main_botkeep
         self._critic_llm = None   # the provider chain, built on the first /phanbien
         self.zoom = None          # vnbot.zoom.ZoomChannel: broadcasts go there too, its commands come here
+        self.switches = None      # vnbot.channels.Switches: the on/off of each channel (all on when None)
         # Commands of one chat run in order on one lane; a burst waits instead of
         # spawning a thread per message (the host has 2 GB).
         self._lanes = [ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"telegram-cmd-{i}")
@@ -230,13 +231,17 @@ class TelegramBot:
                 logger.exception("Telegram sendMessage to %s failed", chat_id)
 
     def broadcast(self, text: str) -> None:
-        """Send to the report chats (the daily bot report, the calibration result) and Zoom."""
-        if self.zoom is not None:
+        """Send to the report chats (the daily bot report, the calibration result) and Zoom,
+        each when its switch on the web page is on."""
+        if self.zoom is not None and self._switch("zoom_notify"):
             self.zoom.send(redact(text))
-        if not self.enabled:
+        if not self.enabled or not self._switch("telegram"):
             return
         for chat_id in sorted(self.settings.telegram_report_chat_ids):
             self.send(chat_id, text)
+
+    def _switch(self, name: str) -> bool:
+        return self.switches is None or self.switches.on(name)
 
     def send_file(self, chat_id: int, path, caption: str = "") -> None:
         if isinstance(chat_id, str):
