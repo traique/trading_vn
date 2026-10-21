@@ -62,7 +62,7 @@ TELEGRAM_ALLOWED_IDS=        # để trống lúc đầu, xem bước 4
    - `AI provider chain: router9 -> groq -> ...` (nếu thấy `No AI provider configured` là thiếu key).
    - Nếu thấy `WEB_PASSWORD is not set` thì trang web đang khoá: thêm mật khẩu rồi khởi động lại.
 
-Botkeep tự đặt `SERVER_PORT`; chạy nơi khác thì dùng `PORT` (mặc định 8080).
+Botkeep tự đặt `SERVER_PORT`; chạy nơi khác thì dùng `PORT` hoặc `APP_PORT` (mặc định 8080). Cổng web mở ngay trong 1–2 giây đầu, trước khi bot nạp thư viện: trong lúc đó `/health` trả `{"ok":true,"booting":true}` và các trang khác hiện "Đang khởi động", nên Botkeep không báo "not responding". Log khởi động có dòng `Web: listening on 0.0.0.0:<cổng>`.
 
 ## 4. Lấy Telegram id và mở quyền
 
@@ -254,7 +254,7 @@ Một lượt phân tích đầy đủ tốn khoảng 15-35 lượt gọi AI (4 
 | `TELEGRAM_REPORT_CHAT_IDS` | = allowed ids | Nơi nhận báo cáo hằng ngày |
 | `WEB_PASSWORD` | - | **Bắt buộc** để mở trang web |
 | `PUBLIC_URL` | - | Địa chỉ web, để bot gửi link báo cáo |
-| `SERVER_PORT` / `PORT` | 8080 | Cổng web |
+| `SERVER_PORT` / `PORT` / `APP_PORT` | 8080 | Cổng web (đọc theo thứ tự này) |
 | `WATCHLIST` | - | Watchlist ban đầu (chỉ dùng lần chạy đầu) |
 | `DAILY_REPORT_TIME` | `15:30` | Giờ phân tích watchlist tự động (HH:MM, giờ VN) |
 | `INTRADAY_ALERTS` | 1 | Cảnh báo trong phiên (không gọi AI) |
@@ -291,6 +291,8 @@ Một lượt phân tích đầy đủ tốn khoảng 15-35 lượt gọi AI (4 
 
 | Triệu chứng | Cách xử lý |
 |---|---|
+| Botkeep báo "This application is not responding" | So cổng trong dòng log `Web: listening on 0.0.0.0:<cổng>` với *assigned port* trên panel; khác nhau thì đặt `SERVER_PORT=<assigned port>`. Không có dòng đó thì kiểm tra file khởi động là `main_botkeep.py` |
+| Mọi trang báo "Khởi động lỗi", `/health` trả 500 | Bot không khởi động được; lỗi in trên trang, chi tiết (`Start failed` + traceback) trong log Botkeep |
 | Trang web báo "Trang web đang khoá" | Đặt `WEB_PASSWORD`, khởi động lại |
 | Bot trả "Bot chưa cho phép tài khoản này" | Thêm id vào `TELEGRAM_ALLOWED_IDS`, khởi động lại |
 | `Every LLM provider failed` | Xem `/trangthai`; kiểm tra key, quota, thêm nhà cung cấp dự phòng |

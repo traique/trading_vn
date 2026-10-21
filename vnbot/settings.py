@@ -144,7 +144,7 @@ def load() -> Settings:
     )
     return Settings(
         data_dir=data_dir,
-        port=_int("SERVER_PORT", _int("PORT", 8080)),
+        port=_int("SERVER_PORT", _int("PORT", _int("APP_PORT", 8080))),
         web_password=os.environ.get("WEB_PASSWORD", ""),
         public_url=(os.environ.get("PUBLIC_URL") or "").rstrip("/"),
         telegram_token=os.environ.get("TELEGRAM_TOKEN", ""),
