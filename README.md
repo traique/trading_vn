@@ -167,7 +167,7 @@ Quant Engine không phải ứng viên trong đợt kiểm định này. Chạy 
    - Chiến lược động lượng xếp hạng lại VN30 khi đến kỳ.
 
    Báo cáo 🛡️ / 🤖 / 🚀 / 📊 gửi qua Telegram; NAV được ghi cạnh VNINDEX.
-3. **Phân tích AI đầy đủ** cho từng mã trong watchlist.
+3. **Sàng lọc rồi mới gọi AI:** Quant Engine xét cả watchlist (không tốn AI); chỉ `DAILY_AI_MAX` (mặc định 3) mã BUY/SELL mạnh nhất được AI phân tích đầy đủ, trong hạn mức AI của ngày (`LLM_MAX_CALLS_PER_DAY`, xem [tầng AI dự phòng](deploy/botkeep/README.md#8-tầng-ai-dự-phòng)).
 4. **Tự hiệu chỉnh** Quant Engine và Động lượng, rồi gửi kết quả ⚙️. Phòng thủ không tự hiệu chỉnh.
 
 Ngày lễ (VNINDEX không có phiên) được bỏ qua.

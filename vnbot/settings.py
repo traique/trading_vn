@@ -110,6 +110,8 @@ class Settings:
     calibrate: bool = True          # nightly self-calibration of the thresholds
     signal_strategy: str = "factor"     # which paper strategy the real signals follow
     trade_time: str = DEFAULT_TRADE_TIME  # HH:MM, Vietnam time, >= MIN_TRADE_TIME: bot + calibration
+    daily_ai_max: int = 3           # watchlist codes given the full AI analysis each day (0 = none)
+    daily_ai_actions: tuple[str, ...] = ("BUY", "SELL")   # engine actions worth that analysis
     extra: dict = field(default_factory=dict)
 
 
@@ -121,6 +123,7 @@ def load() -> Settings:
     os.environ.setdefault("TRADINGAGENTS_CACHE_DIR", str(data_dir / "cache"))
     os.environ.setdefault("TRADINGAGENTS_MEMORY_LOG_PATH", str(data_dir / "memory" / "trading_memory.md"))
     os.environ.setdefault("TRADINGAGENTS_OUTPUT_LANGUAGE", "Vietnamese")
+    os.environ.setdefault("LLM_USAGE_PATH", str(data_dir / "llm_usage.json"))   # the day's AI budget
     allowed = _ids("TELEGRAM_ALLOWED_IDS") or _ids("ALLOWED_USER_ID")
     report_time = _hhmm("DAILY_REPORT_TIME", "15:30")
     watch = tuple(
@@ -150,6 +153,10 @@ def load() -> Settings:
         calibrate=_flag("AUTO_CALIBRATE", True),
         signal_strategy=_choice("SIGNAL_STRATEGY", ("factor", "momentum", "engine"), "factor"),
         trade_time=_trade_time(report_time),
+        daily_ai_max=max(0, _int("DAILY_AI_MAX", 3)),
+        daily_ai_actions=tuple(
+            a.strip().upper() for a in (os.environ.get("DAILY_AI_ACTIONS") or "BUY,SELL").split(",") if a.strip()
+        ),
     )
 
 

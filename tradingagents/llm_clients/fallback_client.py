@@ -11,8 +11,16 @@ single LangChain chat model they can ``invoke``, ``bind_tools`` and ask for
   ``LLM_QUOTA_COOLDOWN_SEC`` (default 300 s), one that refuses the key for an
   hour, and 9Router once down rests ``ROUTER9_RETRY_SEC`` (default 900 s), so
   the next calls go straight to a working provider;
-- when every provider is resting, they are all tried anyway, in order, rather
-  than failing a call that one of them might now serve.
+- when every provider is resting, the call fails at once instead of hitting
+  providers that just throttled or went down again (``LLM_TRY_RESTING=1``
+  brings back the old "try them all anyway");
+- at most ``LLM_MAX_CONCURRENT`` requests are in flight at once (default 2:
+  the parallel analysts no longer fire four requests together);
+- a day (Vietnam time) has a budget: ``LLM_MAX_CALLS_PER_DAY`` requests in all
+  (default 300) and ``<PROVIDER>_MAX_CALLS_PER_DAY`` per provider (OpenRouter
+  defaults to 45, under its free tier's 50 a day; 0 = no cap). A provider past
+  its cap is skipped until tomorrow; past the total, calls fail with
+  ``LLMBudgetExceeded``. Counts survive a restart when ``LLM_USAGE_PATH`` is set.
 
 An answer the provider did give but that does not parse (structured output) is
 not a provider failure: it is raised to the agent, which falls back to free
@@ -28,16 +36,22 @@ Configuration (environment):
     OPENROUTER_API_KEY   OPENROUTER_MODEL (default a ":free" model)
     XAI_API_KEY          XAI_MODEL (default grok-4-fast) - Grok, optional
     LLM_CALL_TIMEOUT_SEC per-call timeout (default 120)
+    LLM_MAX_CONCURRENT   requests in flight at once (default 2)
+    LLM_MAX_CALLS_PER_DAY  requests per day, all providers (default 300; 0 = no cap)
+    ROUTER9_MAX_CALLS_PER_DAY, GROQ_..., OPENROUTER_... (default 45), XAI_...
+    LLM_USAGE_PATH       JSON file keeping the day's counts across restarts
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import threading
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from langchain_core.language_models.chat_models import BaseChatModel
@@ -83,6 +97,14 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
+class LLMBudgetExceeded(RuntimeError):
+    """The day's request budget is spent: no provider is called until tomorrow."""
+
+
+class AllProvidersResting(RuntimeError):
+    """Every provider is resting after a recent failure; the call is not sent."""
+
+
 # ─── Provider health, shared by every model of the process ───────────────────
 
 _resting_until: dict[str, float] = {}
@@ -124,6 +146,8 @@ def provider_status() -> list[dict]:
             "model": os.environ.get(ENDPOINTS[name].model_env) or ENDPOINTS[name].default_model,
             "resting_seconds": max(0, int(until - now)),
             "last_error": reason,
+            "calls_today": usage_today()["by"].get(name, 0),
+            "cap": provider_cap(name),
         })
     return rows
 
@@ -132,6 +156,107 @@ def reset_provider_state() -> None:
     with _lock:
         _resting_until.clear()
         _last_error.clear()
+        _usage.clear()
+    global _semaphore
+    _semaphore = None
+
+
+# ─── Daily budget and concurrency ───────────────────────────────────────────
+
+_VN = timezone(timedelta(hours=7))
+_usage: dict = {}                 # {"day": "YYYY-MM-DD", "total": n, "by": {provider: n}}
+_semaphore: threading.BoundedSemaphore | None = None
+_semaphore_lock = threading.Lock()
+DEFAULT_PROVIDER_CAPS = {"openrouter": 45}
+
+
+def _today() -> str:
+    return datetime.now(_VN).strftime("%Y-%m-%d")
+
+
+def _total_cap() -> int:
+    return int(_env_float("LLM_MAX_CALLS_PER_DAY", 300))
+
+
+def provider_cap(name: str) -> int:
+    """Requests a day this provider may receive; 0 = no cap."""
+    return int(_env_float(f"{name.upper()}_MAX_CALLS_PER_DAY", DEFAULT_PROVIDER_CAPS.get(name, 0)))
+
+
+def _usage_today() -> dict:
+    """The day's counts (caller holds ``_lock``), loaded from LLM_USAGE_PATH after a restart."""
+    day = _today()
+    if _usage.get("day") != day:
+        loaded = {}
+        path = os.environ.get("LLM_USAGE_PATH")
+        if path:
+            try:
+                with open(path, encoding="utf-8") as handle:
+                    loaded = json.load(handle)
+            except (OSError, ValueError):
+                loaded = {}
+        if loaded.get("day") != day:
+            loaded = {"day": day, "total": 0, "by": {}}
+        _usage.clear()
+        _usage.update(day=day, total=int(loaded.get("total", 0)), by=dict(loaded.get("by") or {}))
+    return _usage
+
+
+def _save_usage() -> None:
+    path = os.environ.get("LLM_USAGE_PATH")
+    if not path:
+        return
+    try:
+        tmp = f"{path}.tmp"
+        with open(tmp, "w", encoding="utf-8") as handle:
+            json.dump(_usage, handle)
+        os.replace(tmp, path)
+    except OSError as exc:
+        logger.debug("LLM usage not saved: %s", exc)
+
+
+def _over_cap(name: str) -> bool:
+    cap = provider_cap(name)
+    with _lock:
+        return bool(cap) and _usage_today()["by"].get(name, 0) >= cap
+
+
+def _spend(name: str) -> None:
+    """Count one request to ``name``; LLMBudgetExceeded when the day's total is spent."""
+    cap = _total_cap()
+    with _lock:
+        usage = _usage_today()
+        if cap and usage["total"] >= cap:
+            raise LLMBudgetExceeded(
+                f"Đã dùng hết hạn mức {cap} lượt gọi AI hôm nay (LLM_MAX_CALLS_PER_DAY); "
+                "mai bot tự chạy lại.")
+        usage["total"] += 1
+        usage["by"][name] = usage["by"].get(name, 0) + 1
+        _save_usage()
+
+
+def usage_today() -> dict:
+    """The day's request counts and caps (for a status page)."""
+    with _lock:
+        usage = _usage_today()
+        return {"day": usage["day"], "total": usage["total"], "cap": _total_cap(), "by": dict(usage["by"])}
+
+
+def budget_left() -> int | None:
+    """Requests left today in the total budget; None when it has no cap."""
+    cap = _total_cap()
+    if not cap:
+        return None
+    with _lock:
+        return max(0, cap - _usage_today()["total"])
+
+
+def _slot() -> threading.BoundedSemaphore:
+    global _semaphore
+    with _semaphore_lock:
+        if _semaphore is None:
+            _semaphore = threading.BoundedSemaphore(max(1, int(_env_float("LLM_MAX_CONCURRENT", 2))))
+        return _semaphore
 
 
 def configured_order() -> list[str]:
@@ -183,20 +308,31 @@ def _router9_rest() -> float:
 def run_chain(chain: Sequence[tuple[str, Any]], call) -> Any:
     """``call(model)`` on each provider in turn until one answers.
 
-    ``chain`` is ``[(name, model), ...]``. Resting providers go last instead of
-    being dropped, so a call never fails while some provider might answer.
+    ``chain`` is ``[(name, model), ...]``. Resting providers and those past
+    their daily cap are skipped; when that leaves none, the call fails without
+    sending anything (``LLM_TRY_RESTING=1``: resting ones are tried last instead).
     """
     if not chain:
         raise RuntimeError(
             "No LLM provider configured: set ROUTER9_BASE_URL and ROUTER9_API_KEY, "
             "or GROQ_API_KEY / OPENROUTER_API_KEY / XAI_API_KEY."
         )
-    ready = [item for item in chain if not is_resting(item[0])]
-    ordered = ready + [item for item in chain if item not in ready]
+    usable = [item for item in chain if not _over_cap(item[0])]
+    ready = [item for item in usable if not is_resting(item[0])]
+    ordered = list(ready)
+    if os.environ.get("LLM_TRY_RESTING", "").strip().lower() in ("1", "true", "yes", "on"):
+        ordered += [item for item in usable if item not in ready]
+    if not ordered:
+        why = "; ".join(f"{ENDPOINTS[n].label}: " + ("hết hạn mức ngày" if _over_cap(n) else
+                                                    f"đang nghỉ ({_last_error.get(n, '')})")
+                        for n, _ in chain if n in ENDPOINTS)
+        raise AllProvidersResting("Mọi nhà cung cấp AI đang nghỉ hoặc hết hạn mức, không gửi thêm: " + why)
     errors = []
     for name, model in ordered:
+        _spend(name)
         try:
-            result = call(model)
+            with _slot():
+                result = call(model)
         except Exception as exc:  # noqa: BLE001 - classified below
             is_provider_failure, rest, reason = _classify(exc)
             if not is_provider_failure:
@@ -272,10 +408,11 @@ def build_chain(model_override: str | None = None, **llm_kwargs) -> list[tuple[s
             model = model_override
         base_url = (os.environ.get(endpoint.base_url_env or "") or endpoint.default_base_url or "").rstrip("/")
         kwargs = {k: v for k, v in llm_kwargs.items() if k in ("temperature", "max_tokens", "callbacks")}
-        # One retry inside the SDK; the chain is the real fallback.
+        # No retry inside the SDK: a retry on a 429 is exactly what overloads a
+        # gateway, and the chain is the real fallback.
         chain.append((name, LocalCompatibleChatOpenAI(
             model=model, base_url=base_url, api_key=os.environ[endpoint.key_env],
-            timeout=timeout, max_retries=1, **kwargs,
+            timeout=timeout, max_retries=0, **kwargs,
         )))
     return chain
 

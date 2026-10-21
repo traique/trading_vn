@@ -485,15 +485,18 @@ class TelegramBot:
             self.send(chat_id, "Đang theo dõi: " + (", ".join(codes) if codes else "(trống)"))
 
     def _status(self) -> str:
-        from tradingagents.llm_clients.fallback_client import provider_status
+        from tradingagents.llm_clients.fallback_client import provider_status, usage_today
 
         lines = ["Hàng đợi:"]
         for job in self.jobs.recent(8):
             lines.append(f"- {job.ticker} {job.date}: {job.status} {job.action}".rstrip())
-        lines.append("\nNhà cung cấp AI (theo thứ tự):")
+        usage = usage_today()
+        cap = f"/{usage['cap']}" if usage["cap"] else ""
+        lines.append(f"\nNhà cung cấp AI (theo thứ tự), hôm nay đã gọi {usage['total']}{cap} lượt:")
         for row in provider_status():
             state = f"nghỉ {row['resting_seconds']}s ({row['last_error']})" if row["resting_seconds"] else "sẵn sàng"
-            lines.append(f"- {row['label']} [{row['model']}]: {state}")
+            calls = f"{row['calls_today']}/{row['cap']}" if row["cap"] else str(row["calls_today"])
+            lines.append(f"- {row['label']} [{row['model']}]: {state}, {calls} lượt")
         return "\n".join(lines)
 
     # ── job events ──

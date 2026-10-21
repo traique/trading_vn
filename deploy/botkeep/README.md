@@ -114,7 +114,7 @@ Mã nhận được các dạng `FPT`, `fpt`, `FPT.VN`, `HOSE:FPT`. Chỉ số (
 Hai lịch chạy độc lập (giờ Việt Nam):
 
 1. **Bot giao dịch** (nếu `TRADE_MODE` khác `off`), mỗi ngày lúc `TRADE_TIME` (mặc định = `DAILY_REPORT_TIME` nếu sau 15:05, ngược lại 15:30; **không bao giờ trước 15:05**, khi nến ngày mới chốt): khớp các phiên chưa xử lý, ra quyết định, đặt lệnh cho phiên tới cho cả ba chiến lược, gửi báo cáo 🛡️ Phòng thủ, 🤖 Quant Engine, 🚀 Động lượng và 📊 so sánh qua Telegram. Sau đó **tự hiệu chỉnh** (nếu `AUTO_CALIBRATE=1`) trên phiên vừa xử lý, gửi kết quả ⚙️.
-2. **Phân tích đầy đủ bằng AI** cho từng mã trong watchlist, thứ Hai - thứ Sáu lúc `DAILY_REPORT_TIME` (có thể đặt buổi sáng; trước giờ đóng cửa phân tích dùng phiên đã đóng gần nhất).
+2. **Sàng lọc watchlist rồi mới gọi AI**, thứ Hai - thứ Sáu lúc `DAILY_REPORT_TIME` (có thể đặt buổi sáng; trước giờ đóng cửa phân tích dùng phiên đã đóng gần nhất). Quant Engine xét mọi mã (không tốn lượt AI) và gửi một tin tóm tắt; chỉ `DAILY_AI_MAX` (mặc định 3) mã có hành động trong `DAILY_AI_ACTIONS` (mặc định `BUY,SELL`), xếp theo độ tin cậy của engine, mới được AI phân tích đầy đủ, và chỉ khi hạn mức AI trong ngày còn đủ. Mã khác muốn xem AI thì gửi `/phantich MÃ`.
 
 - **Ngày lễ:** bot giao dịch chỉ xử lý những phiên VNINDEX thực sự có nến, nên ngày lễ tự bỏ qua; phân tích watchlist cũng bỏ qua ngày lễ khi chạy sau 15:05.
 - **Chạy bù:** mỗi lần chạy (kể cả lúc server khởi động), bot xử lý lần lượt mọi phiên bị lỡ từ phiên cuối đã xử lý, mỗi phiên chỉ dùng dữ liệu tới phiên đó. Bù tối đa 20 phiên; phiên cũ hơn bị bỏ qua và lệnh chờ của chúng bị huỷ (báo cáo có ghi).
@@ -151,7 +151,12 @@ Mỗi lượt gọi AI đi theo `PROVIDER_ORDER` (mặc định `router9,groq,op
 - Lỗi kết nối, timeout, lỗi máy chủ hoặc bị từ chối yêu cầu → chuyển ngay sang nhà cung cấp kế tiếp.
 - Bị 429 (hết quota) → nghỉ theo `Retry-After`, hoặc `LLM_QUOTA_COOLDOWN_SEC` (mặc định 300 s).
 - Key bị từ chối → nghỉ 1 giờ. 9Router lỗi → nghỉ `ROUTER9_RETRY_SEC` (mặc định 900 s).
-- Khi tất cả đang nghỉ, vẫn thử lần lượt thay vì báo lỗi ngay.
+- Khi tất cả đang nghỉ hoặc hết hạn mức, lượt gọi **báo lỗi ngay, không gửi gì** (trước đây vẫn thử lần lượt, chính điều này làm gateway đang quá tải bị dồn thêm). `LLM_TRY_RESTING=1` để quay lại cách cũ.
+- Không retry bên trong SDK: một lượt gọi chỉ gửi một yêu cầu tới mỗi nhà cung cấp.
+- Tối đa `LLM_MAX_CONCURRENT` (mặc định 2) yêu cầu cùng lúc.
+- Hạn mức ngày (giờ VN, giữ qua lần khởi động lại trong `data/llm_usage.json`): tổng `LLM_MAX_CALLS_PER_DAY` (mặc định 300) và riêng từng nhà cung cấp `<TÊN>_MAX_CALLS_PER_DAY` (`ROUTER9_`, `GROQ_`, `OPENROUTER_`, `XAI_`; OpenRouter mặc định 45, dưới mức 50 lượt/ngày của gói free; 0 = không giới hạn). Nhà cung cấp hết hạn mức được bỏ qua tới hôm sau; hết tổng hạn mức thì mọi lượt phân tích báo lỗi tới hôm sau. `/trangthai` và trang web hiện số lượt đã dùng.
+
+Một lượt phân tích đầy đủ tốn khoảng 15-35 lượt gọi AI (4 analyst kèm các vòng gọi tool, Bull/Bear, Research Manager, Trader, 3 góc nhìn rủi ro, Portfolio Manager). Giảm `MAX_TOOL_ROUNDS` nếu cần tiết kiệm thêm.
 
 `QUICK_MODEL` / `DEEP_MODEL` chọn model trên 9Router cho hai tầng (tầng deep dùng cho Research Manager và Portfolio Manager). Các nhà cung cấp khác dùng `GROQ_MODEL`, `OPENROUTER_MODEL`, `XAI_MODEL`.
 
@@ -168,6 +173,10 @@ Mỗi lượt gọi AI đi theo `PROVIDER_ORDER` (mặc định `router9,groq,op
 | `LLM_QUOTA_COOLDOWN_SEC` | 300 | Nghỉ khi 429 không có Retry-After |
 | `ROUTER9_RETRY_SEC` | 900 | Nghỉ khi 9Router lỗi |
 | `LLM_CALL_TIMEOUT_SEC` | 120 | Timeout mỗi lượt gọi AI |
+| `LLM_MAX_CALLS_PER_DAY` | 300 | Tổng lượt gọi AI mỗi ngày (0 = không giới hạn) |
+| `ROUTER9_MAX_CALLS_PER_DAY`, `GROQ_…`, `OPENROUTER_…`, `XAI_…` | 0, OpenRouter 45 | Hạn mức ngày từng nhà cung cấp (0 = không giới hạn) |
+| `LLM_MAX_CONCURRENT` | 2 | Số lượt gọi AI chạy cùng lúc |
+| `LLM_TRY_RESTING` | 0 | 1 = vẫn gọi nhà cung cấp đang nghỉ khi không còn ai khác |
 | `TELEGRAM_TOKEN` | - | Token bot (bỏ trống = tắt bot) |
 | `TELEGRAM_ALLOWED_IDS` | - | Id được dùng bot |
 | `TELEGRAM_REPORT_CHAT_IDS` | = allowed ids | Nơi nhận báo cáo hằng ngày |
@@ -176,6 +185,8 @@ Mỗi lượt gọi AI đi theo `PROVIDER_ORDER` (mặc định `router9,groq,op
 | `SERVER_PORT` / `PORT` | 8080 | Cổng web |
 | `WATCHLIST` | - | Watchlist ban đầu (chỉ dùng lần chạy đầu) |
 | `DAILY_REPORT_TIME` | `15:30` | Giờ phân tích watchlist tự động (HH:MM, giờ VN) |
+| `DAILY_AI_MAX` | 3 | Số mã watchlist được AI phân tích đầy đủ mỗi ngày (0 = không gọi AI ở lượt tự động) |
+| `DAILY_AI_ACTIONS` | `BUY,SELL` | Hành động của Quant Engine đáng để AI phân tích |
 | `TRADE_TIME` | `DAILY_REPORT_TIME` nếu ≥ 15:05, ngược lại `15:30` | Giờ bot giao dịch + hiệu chỉnh chạy (HH:MM, giờ VN); giá trị trước 15:05 được nâng lên 15:05 |
 | `MAX_PENDING` | 10 | Số lượt chờ tối đa từ web/Telegram |
 | `TRADE_MODE` | `paper` | `paper` / `signal` / `off` |

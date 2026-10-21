@@ -361,8 +361,10 @@ def create_app(settings: Settings, jobs: JobQueue, watchlist: Watchlist, trader=
             state = (f'<span class="badge b-watch">nghỉ {p["resting_seconds"]}s</span> '
                      f'<span class="muted small">{html.escape(p["last_error"])}</span>'
                      if p["resting_seconds"] else '<span class="badge b-ok">sẵn sàng</span>')
+            calls = f'{p["calls_today"]}/{p["cap"]}' if p["cap"] else str(p["calls_today"])
             providers.append(f'<tr><td><b>{html.escape(p["label"])}</b></td>'
-                             f'<td class="muted small">{html.escape(p["model"])}</td><td>{state}</td></tr>')
+                             f'<td class="muted small">{html.escape(p["model"])}</td><td>{state}</td>'
+                             f'<td class="muted small">{calls} lượt hôm nay</td></tr>')
         codes = watchlist.get()
         today = today_vn()
         ask = f"""

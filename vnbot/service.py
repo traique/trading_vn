@@ -77,6 +77,10 @@ class Watchlist:
         return clean[:30]
 
 
+# A full analysis costs this many AI requests, give or take (four analysts with
+# their tool rounds, the debate, the trader, three risk views, the manager).
+CALLS_PER_ANALYSIS = 25
+
 # A weekday whose VNINDEX bar is still missing at this time (Vietnam) is a holiday;
 # before it, a missing bar is taken as late (the provider has not published it yet).
 LATE_BAR_CUTOFF = "18:00"
@@ -103,8 +107,11 @@ class DailyScheduler:
       weekday whose bar is not published yet (the run reached only the day
       before), the day is not stamped: it is tried again every
       ``LATE_BAR_RETRY_SECONDS`` until ``LATE_BAR_CUTOFF``, then taken as a holiday.
-    - weekdays at ``daily_report_time``: the watchlist's full analyses (a missing
-      bar after the close is likewise waited for until ``LATE_BAR_CUTOFF``).
+    - weekdays at ``daily_report_time``: the watchlist, screened by the
+      quantitative engine (no AI); only the best ``daily_ai_max`` codes whose
+      action is in ``daily_ai_actions`` get the full AI analysis, within the
+      day's AI budget (a missing bar after the close is likewise waited for
+      until ``LATE_BAR_CUTOFF``).
     """
 
     RETRY_SECONDS = 600            # first retry; doubles per failure up to MAX_RETRY_SECONDS
@@ -257,10 +264,65 @@ class DailyScheduler:
             return
         removed = prune_cache(self.settings)
         codes = self.watchlist.get()
-        logger.info("Daily run %s: %d codes, %d stale cache files removed", day, len(codes), removed)
-        for code in codes:
+        picked, text = self._screen(codes, day)
+        logger.info("Daily run %s: %d codes, AI for %s, %d stale cache files removed",
+                    day, len(codes), ",".join(picked) or "none", removed)
+        for code in picked:
             self.jobs.submit(code, day, "daily")
         write_text_atomic(self._stamp, day)
+        if text:
+            self.notify(text)
+
+    @staticmethod
+    def _quick(code: str, day: str):
+        from tradingagents.quant import engine
+
+        return engine.analyze(code, day)
+
+    def _screen(self, codes: list[str], day: str) -> tuple[list[str], str]:
+        """Which codes get the full AI analysis, and a summary of the screen.
+
+        Like the OKX bot's scan: the engine (code, no AI) looks at every code;
+        only the strongest ones whose action calls for a decision are sent to
+        the AI, so the AI argues about a few real candidates instead of thirty.
+        """
+        from tradingagents.llm_clients.fallback_client import budget_left
+
+        rows, errors = [], []
+        for code in codes:
+            try:
+                result = self._quick(code, day)
+            except Exception as exc:  # noqa: BLE001 - one code's data must not stop the run
+                logger.warning("Daily screen %s: %s", code, exc)
+                errors.append(code)
+                continue
+            rows.append((code, result.action, float(result.confidence or 0)))
+        wanted = [r for r in rows if r[1] in self.settings.daily_ai_actions]
+        wanted.sort(key=lambda r: r[2], reverse=True)
+        limit = self.settings.daily_ai_max
+        left = budget_left()
+        if left is not None:
+            limit = min(limit, left // CALLS_PER_ANALYSIS)
+        picked = [r[0] for r in wanted[:limit]]
+        if not rows and not errors:
+            return picked, ""
+        lines = [f"📋 Watchlist {day}: Quant Engine đã xét {len(rows)} mã (không tốn lượt AI)."]
+        if picked:
+            lines.append("AI phân tích đầy đủ: " + ", ".join(picked) + " (báo cáo gửi sau).")
+        held_back = [r[0] for r in wanted[limit:]]
+        if held_back:
+            if limit < self.settings.daily_ai_max:
+                why = "hạn mức AI hôm nay sắp hết"
+            else:
+                why = f"chỉ lấy {self.settings.daily_ai_max} mã mạnh nhất (DAILY_AI_MAX)"
+            lines.append(f"Đạt nhưng chưa gọi AI ({why}): " + ", ".join(held_back))
+        for code, action, confidence in rows:
+            if code not in picked:
+                lines.append(f"• {code}: {action} ({confidence * 100:.0f}%)")
+        if errors:
+            lines.append("Lỗi dữ liệu: " + ", ".join(errors))
+        lines.append("Muốn AI phân tích một mã: /phantich MÃ")
+        return picked, "\n".join(lines)
 
     def tick(self) -> None:
         from tradingagents.market import vn_rules
