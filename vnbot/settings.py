@@ -110,6 +110,7 @@ class Settings:
     calibrate: bool = True          # nightly self-calibration of the thresholds
     signal_strategy: str = "factor"     # which paper strategy the real signals follow
     trade_time: str = DEFAULT_TRADE_TIME  # HH:MM, Vietnam time, >= MIN_TRADE_TIME: bot + calibration
+    scan_universe: str = "vn100"    # the daily screen: vn100 | vn30 | watchlist (always plus the watchlist)
     daily_ai_mode: str = "critic"   # critic (1 AI request a code) | full (the agents, ~25) | off
     daily_ai_max: int = 5           # watchlist codes sent to the AI each day (0 = none)
     daily_ai_actions: tuple[str, ...] = ("BUY", "SELL")   # engine actions worth asking the AI about
@@ -154,6 +155,7 @@ def load() -> Settings:
         calibrate=_flag("AUTO_CALIBRATE", True),
         signal_strategy=_choice("SIGNAL_STRATEGY", ("factor", "momentum", "engine"), "factor"),
         trade_time=_trade_time(report_time),
+        scan_universe=_choice("SCAN_UNIVERSE", ("vn100", "vn30", "watchlist"), "vn100"),
         daily_ai_mode=_choice("DAILY_AI_MODE", ("critic", "full", "off"), "critic"),
         daily_ai_max=max(0, _int("DAILY_AI_MAX", 5)),
         daily_ai_actions=tuple(

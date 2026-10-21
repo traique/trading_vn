@@ -271,7 +271,7 @@ class DailyScheduler:
             write_text_atomic(self._stamp, day)
             return
         removed = prune_cache(self.settings)
-        codes = self.watchlist.get()
+        codes = self._scan_codes()
         picked, text = self._screen(codes, day)
         logger.info("Daily run %s: %d codes, AI (%s) for %s, %d stale cache files removed",
                     day, len(codes), self.settings.daily_ai_mode, ",".join(picked) or "none", removed)
@@ -283,6 +283,20 @@ class DailyScheduler:
             text += "\n\n" + self._critique(picked, day)
         if text:
             self.notify(text)
+
+    def _scan_codes(self) -> list[str]:
+        """The watchlist, then the members of SCAN_UNIVERSE's index (VN30 when VN100 is unavailable)."""
+        from tradingagents.dataflows import money_flows as mf
+
+        codes = list(self.watchlist.get())
+        group = {"vn100": "VN100", "vn30": "VN30"}.get(self.settings.scan_universe)
+        if group:
+            members = mf.index_members(group)
+            if not members and group != "VN30":
+                logger.warning("Daily screen: %s members unavailable, screening VN30", group)
+                members = mf.index_members("VN30")
+            codes += [c for c in members if c not in codes]
+        return codes
 
     @staticmethod
     def _quick(code: str, day: str):
@@ -337,7 +351,12 @@ class DailyScheduler:
         picked = [r[0] for r in wanted[:limit]]
         if not rows and not errors:
             return picked, ""
-        lines = [f"📋 Watchlist {day}: Quant Engine đã xét {len(rows)} mã (không tốn lượt AI)."]
+        scope = {"vn100": "VN100 + watchlist", "vn30": "VN30 + watchlist"}.get(self.settings.scan_universe, "watchlist")
+        counts: dict[str, int] = {}
+        for _, action, _ in rows:
+            counts[action] = counts.get(action, 0) + 1
+        lines = [f"📋 Quét {scope} {day}: Quant Engine đã xét {len(rows)} mã (không tốn lượt AI).",
+                 "Kết quả: " + " · ".join(f"{a} {n}" for a, n in sorted(counts.items(), key=lambda x: -x[1]))]
         if picked and mode == "full":
             lines.append("AI phân tích đầy đủ: " + ", ".join(picked) + " (báo cáo gửi sau).")
         held_back = [r[0] for r in wanted[limit:]]
@@ -349,9 +368,12 @@ class DailyScheduler:
             else:
                 why = f"chỉ lấy {self.settings.daily_ai_max} mã mạnh nhất (DAILY_AI_MAX)"
             lines.append(f"Đạt nhưng chưa gọi AI ({why}): " + ", ".join(held_back))
-        for code, action, confidence in rows:
-            if code not in picked:
-                lines.append(f"• {code}: {action} ({confidence * 100:.0f}%)")
+        watched = set(self.watchlist.get())
+        shown = [r for r in rows if r[0] in watched and r[0] not in picked and r[0] not in held_back]
+        if shown:
+            lines.append("Watchlist:")
+        for code, action, confidence in shown:
+            lines.append(f"• {code}: {action} ({confidence * 100:.0f}%)")
         if errors:
             lines.append("Lỗi dữ liệu: " + ", ".join(errors))
         lines.append("AI phản biện một mã (1 lượt gọi): /phanbien MÃ · phân tích đầy đủ (~25 lượt): /phantich MÃ")

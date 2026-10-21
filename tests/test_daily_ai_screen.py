@@ -45,9 +45,10 @@ class FakeLLM:
 
 @pytest.fixture
 def settings(tmp_path, monkeypatch):
-    for name in ("DAILY_AI_MAX", "DAILY_AI_ACTIONS", "DAILY_AI_MODE", "WATCHLIST"):
+    for name in ("DAILY_AI_MAX", "DAILY_AI_ACTIONS", "DAILY_AI_MODE", "WATCHLIST", "SCAN_UNIVERSE"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("SCAN_UNIVERSE", "watchlist")       # the index screen has its own tests
     monkeypatch.setattr(critic, "bars_after", lambda code, day: [])     # no shadow results yet
     return settings_module.load()
 
@@ -85,6 +86,29 @@ def test_the_critic_asks_once_per_strongest_code(settings, monkeypatch):
     rows = sched.critic_log.rows()
     assert [(r["code"], r["verdict"]) for r in rows] == [("HPG", "REJECT"), ("FPT", "AGREE")]
     assert sched._stamp.read_text() == "2026-10-14"
+
+
+@pytest.mark.unit
+def test_the_screen_covers_vn100_plus_the_watchlist(settings, monkeypatch):
+    from tradingagents.dataflows import money_flows as mf
+
+    asked = []
+
+    def members(group):
+        asked.append(group)
+        return {"VN100": ["HPG", "MWG", "VCB"], "VN30": ["HPG"]}.get(group, [])
+
+    monkeypatch.setattr(mf, "index_members", members)
+    vn100 = dataclasses.replace(settings, scan_universe="vn100", daily_ai_max=1)
+    sched, _, notes, llm = _run(vn100, monkeypatch, ["FPT", "SSI"])
+    assert asked == ["VN100"] and len(llm.prompts) == 1 and "HPG" in llm.prompts[0]
+    text = notes[0]
+    assert "Quét VN100 + watchlist" in text and "đã xét 5 mã" in text
+    assert "BUY 2" in text and "Đạt nhưng chưa gọi AI" in text and "FPT, MWG" in text
+    assert "• SSI: WATCH" in text and "• VCB" not in text          # only the watchlist is listed one by one
+    monkeypatch.setattr(mf, "index_members", lambda group: [] if group == "VN100" else ["HPG"])
+    sched, _, notes, _ = _run(vn100, monkeypatch, ["FPT"])
+    assert "đã xét 2 mã" in notes[0]                                  # VN100 down: VN30 instead
 
 
 @pytest.mark.unit
@@ -130,7 +154,10 @@ def test_settings_read_the_daily_ai_limits(monkeypatch, tmp_path):
     for name in ("DAILY_AI_MAX", "DAILY_AI_ACTIONS", "DAILY_AI_MODE"):
         monkeypatch.delenv(name, raising=False)
     loaded = settings_module.load()
+    monkeypatch.delenv("SCAN_UNIVERSE", raising=False)
+    loaded = settings_module.load()
     assert (loaded.daily_ai_mode, loaded.daily_ai_max, loaded.daily_ai_actions) == ("critic", 5, ("BUY", "SELL"))
+    assert loaded.scan_universe == "vn100"
     monkeypatch.setenv("DAILY_AI_MODE", "full")
     monkeypatch.setenv("DAILY_AI_MAX", "0")
     monkeypatch.setenv("DAILY_AI_ACTIONS", "buy, sell, watch")
