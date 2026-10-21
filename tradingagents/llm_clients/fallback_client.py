@@ -17,7 +17,7 @@ single LangChain chat model they can ``invoke``, ``bind_tools`` and ask for
 - at most ``LLM_MAX_CONCURRENT`` requests are in flight at once (default 2:
   the parallel analysts no longer fire four requests together);
 - a day (Vietnam time) has a budget: ``LLM_MAX_CALLS_PER_DAY`` requests in all
-  (default 300) and ``<PROVIDER>_MAX_CALLS_PER_DAY`` per provider (OpenRouter
+  (default 60) and ``<PROVIDER>_MAX_CALLS_PER_DAY`` per provider (OpenRouter
   defaults to 45, under its free tier's 50 a day; 0 = no cap). A provider past
   its cap is skipped until tomorrow; past the total, calls fail with
   ``LLMBudgetExceeded``. Counts survive a restart when ``LLM_USAGE_PATH`` is set.
@@ -37,7 +37,7 @@ Configuration (environment):
     XAI_API_KEY          XAI_MODEL (default grok-4-fast) - Grok, optional
     LLM_CALL_TIMEOUT_SEC per-call timeout (default 120)
     LLM_MAX_CONCURRENT   requests in flight at once (default 2)
-    LLM_MAX_CALLS_PER_DAY  requests per day, all providers (default 300; 0 = no cap)
+    LLM_MAX_CALLS_PER_DAY  requests per day, all providers (default 60; 0 = no cap)
     ROUTER9_MAX_CALLS_PER_DAY, GROQ_..., OPENROUTER_... (default 45), XAI_...
     LLM_USAGE_PATH       JSON file keeping the day's counts across restarts
     ROUTER9_MIN_INTERVAL_SEC, GROQ_..., OPENROUTER_..., XAI_...  seconds between two
@@ -179,7 +179,7 @@ def _today() -> str:
 
 
 def _total_cap() -> int:
-    return int(_env_float("LLM_MAX_CALLS_PER_DAY", 300))
+    return int(_env_float("LLM_MAX_CALLS_PER_DAY", 60))
 
 
 def provider_cap(name: str) -> int:

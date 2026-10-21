@@ -9,7 +9,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from vnbot.jobs import JobQueue, prune_cache, write_text_atomic
+from vnbot.jobs import CALLS_PER_ANALYSIS, JobQueue, prune_cache, write_text_atomic
 from vnbot.settings import MIN_TRADE_TIME, Settings
 
 logger = logging.getLogger(__name__)
@@ -77,9 +77,6 @@ class Watchlist:
         return clean[:30]
 
 
-# A full analysis costs this many AI requests, give or take (four analysts with
-# their tool rounds, the debate, the trader, three risk views, the manager).
-CALLS_PER_ANALYSIS = 25
 # The critic asks once; a second request when the first provider fails.
 CALLS_PER_CRITIC = 2
 

@@ -184,7 +184,7 @@ Mỗi lượt gọi AI đi theo `PROVIDER_ORDER` (mặc định `router9,groq,op
 - Khi tất cả đang nghỉ hoặc hết hạn mức, lượt gọi **báo lỗi ngay, không gửi gì** (trước đây vẫn thử lần lượt, chính điều này làm gateway đang quá tải bị dồn thêm). `LLM_TRY_RESTING=1` để quay lại cách cũ.
 - Không retry bên trong SDK: một lượt gọi chỉ gửi một yêu cầu tới mỗi nhà cung cấp.
 - Tối đa `LLM_MAX_CONCURRENT` (mặc định 2) yêu cầu cùng lúc.
-- Hạn mức ngày (giờ VN, giữ qua lần khởi động lại trong `data/llm_usage.json`): tổng `LLM_MAX_CALLS_PER_DAY` (mặc định 300) và riêng từng nhà cung cấp `<TÊN>_MAX_CALLS_PER_DAY` (`ROUTER9_`, `GROQ_`, `OPENROUTER_`, `XAI_`; OpenRouter mặc định 45, dưới mức 50 lượt/ngày của gói free; 0 = không giới hạn). Nhà cung cấp hết hạn mức được bỏ qua tới hôm sau; hết tổng hạn mức thì mọi lượt phân tích báo lỗi tới hôm sau. `/trangthai` và trang web hiện số lượt đã dùng.
+- Hạn mức ngày (giờ VN, giữ qua lần khởi động lại trong `data/llm_usage.json`): tổng `LLM_MAX_CALLS_PER_DAY` (mặc định 60) và riêng từng nhà cung cấp `<TÊN>_MAX_CALLS_PER_DAY` (`ROUTER9_`, `GROQ_`, `OPENROUTER_`, `XAI_`; OpenRouter mặc định 45, dưới mức 50 lượt/ngày của gói free; 0 = không giới hạn). Nhà cung cấp hết hạn mức được bỏ qua tới hôm sau; hết tổng hạn mức thì mọi lượt gọi AI báo lỗi tới hôm sau; `/phantich` bị từ chối ngay khi hạn mức còn lại dưới 25 lượt (bạn vẫn nhận quyết định của Quant Engine). `/trangthai` và trang web hiện số lượt đã dùng.
 
 - Khoảng nghỉ tối thiểu giữa hai lượt gọi tới cùng một nhà cung cấp: `<TÊN>_MIN_INTERVAL_SEC` (mặc định 0). Các lượt gọi cùng lúc xếp hàng lần lượt, không tới dồn một lúc.
 
@@ -219,7 +219,7 @@ Một lượt phân tích đầy đủ tốn khoảng 15-35 lượt gọi AI (4 
 | `LLM_QUOTA_COOLDOWN_SEC` | 300 | Nghỉ khi 429 không có Retry-After |
 | `ROUTER9_RETRY_SEC` | 900 | Nghỉ khi 9Router lỗi |
 | `LLM_CALL_TIMEOUT_SEC` | 120 | Timeout mỗi lượt gọi AI |
-| `LLM_MAX_CALLS_PER_DAY` | 300 | Tổng lượt gọi AI mỗi ngày (0 = không giới hạn) |
+| `LLM_MAX_CALLS_PER_DAY` | 60 | Tổng lượt gọi AI mỗi ngày (0 = không giới hạn) |
 | `ROUTER9_MAX_CALLS_PER_DAY`, `GROQ_…`, `OPENROUTER_…`, `XAI_…` | 0, OpenRouter 45 | Hạn mức ngày từng nhà cung cấp (0 = không giới hạn) |
 | `LLM_MAX_CONCURRENT` | 2 | Số lượt gọi AI chạy cùng lúc |
 | `ROUTER9_MIN_INTERVAL_SEC`, `GROQ_…`, `OPENROUTER_…`, `XAI_…` | 0 | Số giây tối thiểu giữa hai lượt gọi tới nhà cung cấp đó |

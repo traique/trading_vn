@@ -238,6 +238,18 @@ def test_nhanh_answers_with_the_engine_only(bot, engine_stub):
 
 
 @pytest.mark.unit
+def test_a_full_analysis_is_refused_when_the_budget_cannot_cover_it(queue, monkeypatch):
+    from tradingagents.llm_clients import fallback_client as fc
+
+    monkeypatch.setattr(fc, "budget_left", lambda: 10)
+    job = queue.submit("FPT", "2026-10-13", "web")
+    with pytest.raises(RuntimeError, match="còn 10 lượt"):
+        queue._process(job)
+    assert job.quick_summary == "FPT - NO_TRADE"           # the engine's decision still went out
+    assert job.status == "quick"                           # stopped before the agents ran
+
+
+@pytest.mark.unit
 def test_phanbien_asks_the_ai_once_and_keeps_the_verdict(bot, monkeypatch):
     from tradingagents.quant import engine
     from vnbot import critic
