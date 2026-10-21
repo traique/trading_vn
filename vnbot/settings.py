@@ -124,6 +124,7 @@ class Settings:
     daily_ai_mode: str = "critic"   # critic (1 AI request a code) | full (the agents, ~25) | off
     daily_ai_max: int = 5           # watchlist codes sent to the AI each day (0 = none)
     daily_ai_actions: tuple[str, ...] = ("BUY", "SELL")   # engine actions worth asking the AI about
+    support_email: str = ""         # shown on the public pages a Zoom app needs (/privacy, /support)
     extra: dict = field(default_factory=dict)
 
 
@@ -169,6 +170,7 @@ def load() -> Settings:
         intraday_interval_min=max(5, _int("INTRADAY_INTERVAL_MIN", 15)),
         intraday_vni_drop_pct=_float("INTRADAY_VNI_DROP_PCT", 2.0),
         scan_universe=_choice("SCAN_UNIVERSE", ("vn100", "vn30", "watchlist"), "vn100"),
+        support_email=(os.environ.get("SUPPORT_EMAIL") or "").strip(),
         daily_ai_mode=_choice("DAILY_AI_MODE", ("critic", "full", "off"), "critic"),
         daily_ai_max=max(0, _int("DAILY_AI_MAX", 5)),
         daily_ai_actions=tuple(

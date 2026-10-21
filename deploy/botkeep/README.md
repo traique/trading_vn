@@ -158,13 +158,38 @@ Mỗi cảnh báo gửi một lần mỗi ngày, kể cả khi khởi động l�
 
 ### Zoom Team Chat
 
-Ngang hàng Telegram, làm theo bot OKX:
+Ngang hàng Telegram, làm y như bot OKX (`vnbot/zoom.py`, `vnbot/pages.py`):
 
-- **Thông báo** (báo cáo hằng ngày, AI phản biện, cảnh báo trong phiên) gửi vào Zoom theo một trong hai cách:
-  - Incoming Webhook: trong kênh Zoom gõ `/inc connect vnbot`, dán Endpoint vào `ZOOM_WEBHOOK_URL`, Token vào `ZOOM_WEBHOOK_TOKEN`.
-  - Chatbot: `ZOOM_CLIENT_ID`, `ZOOM_CLIENT_SECRET`, `ZOOM_BOT_JID`, `ZOOM_ACCOUNT_ID` và `ZOOM_TO_JID` (JID nhận tin).
-- **Dùng chung chatbot của bot OKX:** được, nhưng **chỉ để gửi thông báo**. Gửi tin chỉ cần Client ID/Secret của app, nên điền đúng các giá trị của bot OKX, thêm `ZOOM_TO_JID` = JID bot OKX đang ghép đôi (`/zoomstatus` trên Telegram của bot OKX). Tin của hai bot sẽ hiện chung một cuộc trò chuyện, cùng tên bot. Không điền `ZOOM_SECRET_TOKEN` trong trường hợp này.
-- **Gõ lệnh trong Zoom** (`nhanh FPT`, `phanbien HPG`, `danhmuc`, `lenh`, `trangthai`...): mỗi app Zoom chỉ có **một** Bot endpoint URL, nên lệnh gõ vào app của bot OKX luôn tới bot OKX. Muốn ra lệnh cho bot này thì tạo **app chatbot thứ hai** (General App → Team Chat → Chatbot), Bot endpoint URL = `<PUBLIC_URL>/webhook/zoom` (cần HTTPS), rồi điền `ZOOM_SECRET_TOKEN` và `ZOOM_ALLOWED_USERS` (JID hoặc email được phép). Người lạ nhắn bot sẽ bị từ chối và bạn được báo JID của họ qua Telegram. File báo cáo HTML chỉ gửi qua Telegram; trên Zoom bot gửi kèm link trang web.
+- **Thông báo** (báo cáo hằng ngày, AI phản biện, cảnh báo trong phiên) gửi vào Zoom qua Incoming Webhook (`ZOOM_WEBHOOK_URL`, `ZOOM_WEBHOOK_TOKEN`; trong kênh gõ `/inc connect vnbot`) và/hoặc chatbot tới JID đã ghép đôi.
+- **Gõ lệnh trong Zoom** giống Telegram: `nhanh FPT`, `phanbien HPG`, `phantich FPT`, `danhmuc`, `lenh`, `trangthai`, `trogiup`... Trong kênh: `/vnbot nhanh FPT`.
+- **Ghép đôi đúng một tài khoản** như bot OKX: người lạ nhắn bot bị từ chối, bạn được báo JID của họ qua Telegram; gõ `/zoompair <JID> [tên]` hoặc bấm **Ghép đôi** trên trang `/zoom`. `/zoomstatus` xem, `/zoomxoa` gỡ (chỉ trên Telegram). `ZOOM_ALLOWED_USERS` (JID/email) được tự ghép đôi ở tin nhắn đầu. Gỡ app khỏi Zoom thì bot tự xoá ghép đôi.
+
+**Các trang phục vụ Zoom** (có sẵn trong bot):
+
+| Trang | Dùng cho ô nào trên Marketplace |
+|---|---|
+| `/zoom/oauth/callback` | OAuth Redirect URL + OAuth Allow List |
+| `/webhook/zoom` (hoặc `/zoom/bot`) | Bot endpoint URL, Event notification endpoint, Deauthorization endpoint |
+| `/privacy` | Privacy Policy URL |
+| `/terms` | Terms of Use URL |
+| `/support` | Support URL |
+| `/docs` | Documentation URL / Home URL |
+| `/data-deletion` | Hướng dẫn xoá dữ liệu |
+| `/zoom/install` | Nút "Thêm vào Zoom" |
+| `/zoom` | Trang cấu hình (cần mật khẩu web): đúng các URL theo `PUBLIC_URL` kèm nút Chép, kiểm tra biến môi trường, trạng thái cài đặt/ghép đôi, người đang chờ ghép đôi, 20 request Zoom gần nhất (chữ ký đúng/sai và vì sao) |
+
+Các trang công khai song ngữ Việt–Anh, không đặt cookie. Botkeep đã có HTTPS (ví dụ `https://vn.bot-keep.xyz`) nên chatbot chạy được ngay trên Botkeep.
+
+**Cài đặt (Local Test):**
+1. Đặt `PUBLIC_URL` (ví dụ `https://vn.bot-keep.xyz`), `SUPPORT_EMAIL`, rồi Restart.
+2. Đăng nhập web, mở `<PUBLIC_URL>/zoom`, làm theo 7 bước và bấm "Chép" từng URL dán vào marketplace.zoom.us (General App → bật Team Chat → Chatbot, slash command `vnbot`).
+3. Điền `ZOOM_CLIENT_ID`, `ZOOM_CLIENT_SECRET` (Development), `ZOOM_BOT_JID`, `ZOOM_SECRET_TOKEN`, `ZOOM_ACCOUNT_ID`, Restart, bấm **Validate** endpoint trên Marketplace (trang `/zoom` ghi lại request Validate).
+4. Local Test → **Add App Now** → Allow → về trang callback báo "Đã cài thành công".
+5. Zoom → Team Chat → Apps → nhắn `trangthai` → Telegram báo JID → gõ `/zoompair <JID>` (hoặc bấm Ghép đôi trên `/zoom`).
+
+**Dùng chung với bot OKX:** mỗi app Zoom chỉ có **một** Bot endpoint URL. Muốn gõ lệnh cho cả hai bot thì tạo **app thứ hai** cho bot này (cùng cách làm). Nếu chỉ cần nhận thông báo của bot này trong Zoom, có thể mượn app của bot OKX: điền cùng `ZOOM_CLIENT_ID`, `ZOOM_CLIENT_SECRET`, `ZOOM_BOT_JID`, `ZOOM_ACCOUNT_ID`, đặt `ZOOM_TO_JID` = JID bot OKX đang ghép đôi và để trống `ZOOM_SECRET_TOKEN`; tin của hai bot hiện chung một cuộc trò chuyện, cùng tên bot.
+
+File báo cáo HTML chỉ gửi qua Telegram; trên Zoom bot gửi kèm link trang web.
 
 ## 7. Hàng đợi và bảo vệ quota
 
@@ -236,8 +261,11 @@ Một lượt phân tích đầy đủ tốn khoảng 15-35 lượt gọi AI (4 
 | `INTRADAY_INTERVAL_MIN` | 15 | Số phút giữa hai lần kiểm tra trong phiên (tối thiểu 5) |
 | `INTRADAY_VNI_DROP_PCT` | 2 | VNINDEX giảm bao nhiêu % thì báo (báo thêm khi giảm gấp đôi) |
 | `ZOOM_WEBHOOK_URL`, `ZOOM_WEBHOOK_TOKEN` | - | Gửi thông báo vào một kênh Zoom (Incoming Webhook) |
-| `ZOOM_CLIENT_ID`, `ZOOM_CLIENT_SECRET`, `ZOOM_BOT_JID`, `ZOOM_ACCOUNT_ID`, `ZOOM_TO_JID` | - | Chatbot Zoom gửi thông báo tới `ZOOM_TO_JID` (dùng chung được app của bot OKX) |
-| `ZOOM_SECRET_TOKEN`, `ZOOM_ALLOWED_USERS` | - | Nhận lệnh gõ trong Zoom tại `/webhook/zoom` (cần app riêng) |
+| `ZOOM_CLIENT_ID`, `ZOOM_CLIENT_SECRET`, `ZOOM_BOT_JID`, `ZOOM_ACCOUNT_ID` | - | Chatbot Zoom (thông báo tới JID đã ghép đôi, nhận lệnh) |
+| `ZOOM_TO_JID` | - | Gửi thông báo tới JID này thay cho JID đã ghép đôi (mượn app của bot OKX) |
+| `ZOOM_SECRET_TOKEN`, `ZOOM_VERIFICATION_TOKEN` | - | Nhận lệnh gõ trong Zoom tại `/webhook/zoom` (cần app riêng); Verification Token là cơ chế cũ |
+| `ZOOM_ALLOWED_USERS` | - | JID/email được tự ghép đôi ở tin nhắn đầu |
+| `SUPPORT_EMAIL` | - | Email liên hệ trên `/privacy`, `/support` |
 | `SCAN_UNIVERSE` | `vn100` | Rổ mã lượt quét 15:30 xét, luôn cộng watchlist: `vn100`, `vn30`, `watchlist` |
 | `DAILY_AI_MODE` | `critic` | Lượt tự động gọi AI thế nào: `critic` (1 lượt/mã), `full` (chuỗi agent, ~25 lượt/mã), `off` |
 | `DAILY_AI_MAX` | 5 | Số mã watchlist được gửi AI mỗi ngày (0 = không gọi AI ở lượt tự động) |

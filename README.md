@@ -262,7 +262,7 @@ Mã nhận các dạng `FPT`, `fpt`, `FPT.VN`, `HOSE:FPT`. Chỉ số (`VNINDEX`
 | `/trangthai` | Hàng đợi và trạng thái nhà cung cấp AI |
 | `/id` | Telegram id của bạn |
 
-**Zoom Team Chat** (tuỳ chọn, giống bot OKX): mọi thông báo gửi cả vào Zoom (Incoming Webhook hoặc chatbot; dùng chung được app chatbot của bot OKX để nhận thông báo); gõ lệnh trong Zoom cần một app chatbot riêng. Cách cài: [deploy/botkeep/README.md](deploy/botkeep/README.md#zoom-team-chat).
+**Zoom Team Chat** (tuỳ chọn, giống bot OKX): mọi thông báo gửi cả vào Zoom (Incoming Webhook hoặc chatbot; dùng chung được app chatbot của bot OKX để nhận thông báo); gõ lệnh trong Zoom cần một app chatbot riêng, ghép đôi đúng một tài khoản bằng `/zoompair`. Bot có sẵn các trang Zoom Marketplace yêu cầu (`/privacy`, `/terms`, `/support`, `/docs`, `/data-deletion`, OAuth) và trang cấu hình `/zoom`. Cách cài: [deploy/botkeep/README.md](deploy/botkeep/README.md#zoom-team-chat).
 
 ### Trang web
 

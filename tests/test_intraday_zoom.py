@@ -214,6 +214,116 @@ def test_zoom_commands_run_like_telegram_ones_and_strangers_are_refused(settings
     body = json.dumps({"event": "bot_notification", "payload": {
         "cmd": "von 1", "userJid": "evil@xmpp", "toJid": "bot@xmpp", "messageId": "m2"}}).encode()
     client.post("/webhook/zoom", content=body, headers=_signed("sekret", body))
-    kind, text, where = zoom.queue.get_nowait()
-    assert "chưa được phép" in text and where["to_jid"] == "evil@xmpp"
-    assert any("evil@xmpp" in p.get("text", "") for _, p in telegram.sent)   # the owner is told on Telegram
+    replies = _drain(zoom, "reply")
+    assert len(replies) == 1 and "chưa được ghép đôi" in replies[0][1] and replies[0][2]["to_jid"] == "evil@xmpp"
+    assert any("/zoompair evil@xmpp" in p.get("text", "") for _, p in telegram.sent)   # the owner is told on Telegram
+    assert zoom.pending()["jid"] == "evil@xmpp" and zoom.pairing()["jid"] == "me@xmpp"
+
+
+def _drain(zoom, kind=None):
+    items = []
+    while not zoom.queue.empty():
+        items.append(zoom.queue.get_nowait())
+    return [i for i in items if kind is None or i[0] == kind]
+
+
+@pytest.mark.unit
+def test_pairing_like_the_okx_bot(tmp_path):
+    zoom, _ = _zoom(allowed=())
+    zoom.state = __import__("vnbot.zoom", fromlist=["ZoomState"]).ZoomState(tmp_path / "zoom_state.json")
+    owner = []
+    zoom.alert_owner = owner.append
+    ran = []
+    zoom.handler = lambda target, text: ran.append(text)
+    msg = {"payload": {"cmd": "trangthai", "userJid": "me@xmpp", "toJid": "bot@xmpp", "accountId": "acc2",
+                       "userName": "Tôi", "messageId": "a"}}
+    zoom.handle(msg)
+    assert ran == [] and "/zoompair me@xmpp" in owner[0] and not zoom.notify_on   # refused, owner told
+    p = zoom.pair_pending()                                                       # the button on /zoom
+    assert p["jid"] == "me@xmpp" and p["account_id"] == "acc2" and zoom.notify_on
+    assert "Đã ghép đôi" in _drain(zoom, "reply")[-1][1]
+    zoom.handle({**msg, "payload": {**msg["payload"], "messageId": "b", "cmd": "nhanh fpt"}})
+    zoom.handle({**msg, "payload": {**msg["payload"], "messageId": "b", "cmd": "nhanh fpt"}})   # resent by Zoom
+    assert ran == ["/nhanh fpt"]
+    zoom.send("báo cáo")
+    _, _, where = zoom.queue.get_nowait()
+    assert zoom.notify_target() == {"to_jid": "me@xmpp", "user_jid": "me@xmpp", "account_id": "acc2"}
+    restarted = ZoomChannel(zoom.config, state_path=tmp_path / "zoom_state.json", start=False)
+    assert restarted.pairing()["jid"] == "me@xmpp"                                # kept across restarts
+    zoom.lifecycle("app_deauthorized", {"account_id": "acc2"})
+    assert zoom.pairing() == {} and "gỡ khỏi Zoom" in owner[-1]
+
+
+@pytest.mark.unit
+def test_signature_with_the_wrong_variable_is_named_and_requests_are_logged():
+    zoom, _ = _zoom(secret_token="wrong", verification_token="")
+    body = b'{"event":"bot_notification"}'
+    ok, why = zoom.verify_detail(body, _signed("cs", body))                     # signed with the client secret
+    assert ok and "ZOOM_SECRET_TOKEN đang sai" in why
+    ok, why = zoom.verify_detail(body, _signed("nope", body))
+    assert not ok and "không khớp" in why
+    old = {**_signed("wrong", body), "x-zm-request-timestamp": str(int(time.time()) - 900)}
+    assert zoom.verify_detail(body, old) == (False, f"timestamp lệch giờ hoặc không hợp lệ ({old['x-zm-request-timestamp']})")
+    for i in range(25):
+        zoom.record("bot_notification", True, "ok", {"payload": {"cmd": f"c{i}", "userName": "Tôi"}})
+    log = zoom.requests_log()
+    assert len(log) == 20 and log[0]["cmd"] == "c24"
+
+
+@pytest.mark.unit
+def test_telegram_pairing_commands(settings, telegram):
+    zoom, _ = _zoom(allowed=())
+    telegram.zoom = zoom
+    for text in ("/zoomstatus", "/zoompair me@xmpp Tôi", "/zoomstatus", "/zoomxoa", "/zoomstatus"):
+        telegram._handle({"chat": {"id": 111}, "from": {"id": 111}, "text": text})
+    texts = [p.get("text", "") for m, p in telegram.sent if m == "sendMessage"]
+    assert texts[0] == "Chưa ghép đôi JID Zoom nào." and "Đã ghép đôi Zoom: me@xmpp" in texts[1]
+    assert texts[2] == "Zoom đang ghép đôi: Tôi me@xmpp" and texts[3] == "Đã gỡ ghép đôi Zoom."
+    assert texts[4] == "Chưa ghép đôi JID Zoom nào."
+    telegram._handle({"chat": {"id": "zoom:1"}, "from": {"id": "zoom"}, "text": "/zoomxoa"})   # not from Zoom itself
+
+
+@pytest.mark.unit
+def test_public_pages_and_the_zoom_setup_page(settings, monkeypatch):
+    from vnbot import pages
+
+    object.__setattr__(settings, "web_password", "pw")
+    object.__setattr__(settings, "public_url", "https://vn.bot-keep.xyz")
+    object.__setattr__(settings, "support_email", "me@example.com")
+    zoom, _ = _zoom()
+    zoom.state = __import__("vnbot.zoom", fromlist=["ZoomState"]).ZoomState(settings.data_dir / "zoom_state.json")
+    client = TestClient(create_app(settings, SimpleNamespace(recent=lambda n=30: [], is_active=lambda: False),
+                                   Watchlist(settings), zoom=zoom))
+    for path, text in (("/privacy", "Privacy Policy"), ("/terms", "Terms of Use"), ("/support", "me@example.com"),
+                       ("/docs", "/vnbot nhanh FPT"), ("/data-deletion", "Data Deletion")):
+        r = client.get(path)
+        assert r.status_code == 200 and text in r.text, path               # public: no password
+    assert client.get("/zoom").status_code == 401                          # the setup page is not
+    r = client.get("/zoom/install", follow_redirects=False)
+    assert r.status_code == 302 and "redirect_uri=https%3A%2F%2Fvn.bot-keep.xyz%2Fzoom%2Foauth%2Fcallback" in r.headers["location"]
+    state = next(iter(zoom.state.get("oauth_states")))
+
+    monkeypatch.setattr(pages.requests, "post", lambda *a, **k: _Response(200, {"access_token": "t", "scope": "imchat:bot"}))
+    r = client.get(f"/zoom/oauth/callback?code=abcdefghijklmnop&state={state}")
+    assert "Đã cài" in r.text and zoom.state.get("install")["scope"] == "imchat:bot"
+    monkeypatch.setattr(pages.requests, "post", lambda *a, **k: _Response(400, {"error": "invalid_grant"}))
+    assert "Đã cài" in client.get("/zoom/oauth/callback?code=abcdefghijklmnop").text   # the same code twice
+
+    zoom.state.set("pending", {"jid": "me@xmpp", "name": "Tôi", "account_id": "acc", "reply_jid": "me@xmpp", "ts": time.time()})
+    zoom.record("bot_notification", False, "chữ ký không khớp", {"payload": {"cmd": "nhanh"}})
+    page = client.get("/zoom", auth=("u", "pw")).text
+    assert "https://vn.bot-keep.xyz/webhook/zoom" in page and "https://vn.bot-keep.xyz/privacy" in page
+    assert "Ghép đôi tài khoản này" in page and "chữ ký không khớp" in page and "SUPPORT_EMAIL" in page
+    r = client.post("/zoom/pair", auth=("u", "pw"), headers={"Origin": "https://vn.bot-keep.xyz"}, follow_redirects=False)
+    assert r.status_code == 303 and zoom.pairing()["jid"] == "me@xmpp"
+    assert client.post("/zoom/pair", auth=("u", "pw"), headers={"Origin": "https://evil.example"}).status_code == 403
+
+
+@pytest.mark.unit
+def test_app_deauthorized_through_the_webhook(settings):
+    zoom, _ = _zoom()
+    zoom.pair("me@xmpp")
+    client = TestClient(create_app(settings, SimpleNamespace(recent=lambda n=30: []), Watchlist(settings), zoom=zoom))
+    body = json.dumps({"event": "app_deauthorized", "payload": {"account_id": "acc"}}).encode()
+    assert client.post("/zoom/bot", content=body, headers=_signed("sekret", body)).json() == {"ok": True}
+    assert zoom.pairing() == {} and zoom.requests_log()[0]["event"] == "app_deauthorized"

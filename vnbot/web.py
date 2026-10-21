@@ -359,23 +359,45 @@ def create_app(settings: Settings, jobs: JobQueue, watchlist: Watchlist, trader=
         return JSONResponse({"ok": True, "time": time.time()})
 
     async def zoom_webhook(request: Request) -> JSONResponse:
-        """Zoom chatbot events: commands typed in Zoom. Signed by Zoom (HMAC), no password."""
-        if zoom is None or not zoom.commands_on:
-            return JSONResponse({"error": "zoom commands are off"}, status_code=404)
+        """Zoom chatbot events (Bot endpoint, Event notification and Deauthorization endpoint).
+        Signed by Zoom (HMAC), no password; the last requests are kept for the /zoom page."""
+        if zoom is None or not zoom.chatbot_on:
+            return JSONResponse({"error": "zoom is off"}, status_code=404)
         raw = await request.body()
-        if not zoom.verify(raw, request.headers):
-            logger.warning("Zoom webhook: bad or missing signature from %s", _client(request))
-            return JSONResponse({"error": "invalid signature"}, status_code=401)
         try:
             data = json.loads(raw or b"{}")
         except ValueError:
             return JSONResponse({"error": "bad json"}, status_code=400)
-        if data.get("event") == "endpoint.url_validation":
-            return JSONResponse(zoom.url_validation(str((data.get("payload") or {}).get("plainToken", ""))))
+        if not isinstance(data, dict):
+            return JSONResponse({"error": "bad json"}, status_code=400)
+        event = data.get("event")
+        ok, why = zoom.verify_detail(raw, request.headers)
+        if event == "endpoint.url_validation":
+            plain = str((data.get("payload") or {}).get("plainToken", ""))
+            if not ok or not plain or not zoom.config.secret_token:
+                zoom.record(event, False, why if not ok else "thiếu plainToken hoặc ZOOM_SECRET_TOKEN")
+                return JSONResponse({"error": "invalid"}, status_code=401 if not ok else 400)
+            zoom.record(event, True, "đã trả lời Validate")
+            return JSONResponse(zoom.url_validation(plain))
+        zoom.record(event, ok, why, data)
+        if not ok:
+            logger.warning("Zoom webhook from %s refused: %s", _client(request), why)
+            return JSONResponse({"error": "invalid signature"}, status_code=401)
+        if event in ("app_deauthorized", "bot_installed"):
+            zoom.lifecycle(event, data.get("payload") or {})
+            return JSONResponse({"ok": True})
+        if not zoom.commands_on:
+            return JSONResponse({"error": "zoom commands are off"}, status_code=404)
         zoom.handle(data)
         return JSONResponse({"ok": True})
 
     app.add_api_route("/webhook/zoom", zoom_webhook, methods=["POST"])
+    app.add_api_route("/zoom/bot", zoom_webhook, methods=["POST"])     # the OKX bot's other path
+
+    from vnbot import pages
+
+    pages.register(app, settings, zoom, guard=guard, post_guard=post_guard,
+                   notify=(zoom.alert_owner if zoom is not None else None))
 
     critic_llm: list = []        # the provider chain, built on the first web /critic
 
@@ -564,7 +586,8 @@ quét {html.escape(scope)} cùng watchlist, các mã mạnh nhất được AI p
                       sub="Lệnh MUA: chạm stop (−1R), chạm mục tiêu, hoặc sau 20 phiên · lệnh BÁN: giá sau 10 phiên",
                       flush=True)
             + "</div>"
-            + '<div class="mt">' + ui.card("Kênh thông báo", ui.table([("Kênh", ""), ("", "")], chrow, ""), flush=True) + "</div>"
+            + '<div class="mt">' + ui.card("Kênh thông báo", ui.table([("Kênh", ""), ("", "")], chrow, ""), flush=True,
+                                            action='<a class="btn btn-ghost" href="/zoom">Cấu hình Zoom →</a>') + "</div>"
         )
         return _page("AI & cảnh báo", body, active="ai", show_bot=trader is not None and settings.trade_mode != "off")
 

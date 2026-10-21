@@ -63,7 +63,8 @@ def main() -> None:
     jobs = JobQueue(SETTINGS)
     watchlist = Watchlist(SETTINGS)
     bot = TelegramBot(SETTINGS, jobs, watchlist)
-    zoom = ZoomChannel()
+    zoom = ZoomChannel(state_path=SETTINGS.data_dir / "zoom_state.json")
+    zoom.public_url = SETTINGS.public_url
     if zoom.enabled:
         bot.zoom = zoom
         zoom.handler = bot.zoom_command

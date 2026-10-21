@@ -109,7 +109,8 @@ HELP = (
     "/chay - chạy ngay phiên đã đóng gần nhất (không đợi {trade_time})\n"
     "/hieuchinh - ngưỡng đang dùng và kết quả tự hiệu chỉnh gần đây\n"
     "/khop mua FPT 100 56300 - báo đã khớp lệnh thật (bán: /khop ban ...; thêm ngày YYYY-MM-DD nếu khớp hôm trước)\n"
-    "/von 500000000 - đặt tiền mặt tài khoản thật\n\n"
+    "/von 500000000 - đặt tiền mặt tài khoản thật\n"
+    "/zoompair JID [tên] · /zoomxoa · /zoomstatus - ghép đôi / gỡ / xem tài khoản Zoom được dùng bot\n\n"
     "Hành động và mọi mức giá do hệ thống định lượng chốt; các agent AI chỉ diễn giải."
 )
 
@@ -447,6 +448,8 @@ class TelegramBot:
                 self._analyze(chat_id, args)
             elif command == "/phanbien":
                 self._critic(chat_id, args)
+            elif command in ("/zoompair", "/zoomxoa", "/zoomstatus"):
+                self.send(chat_id, self._zoom_pairing(command, args, from_zoom=user_id == ZOOM_USER))
             elif command == "/nhanh":
                 self.send(chat_id, quick_text(*(args.split()[:2] or [""])))
             elif command == "/theodoi":
@@ -477,6 +480,29 @@ class TelegramBot:
         ahead = self.jobs.position(job.id)
         wait = f" (đang có {ahead} lượt chờ trước)" if ahead else ""
         self.send(chat_id, f"⏳ Đã nhận {code} ngày {day}{wait}. Quyết định hệ thống sẽ tới trước, báo cáo đầy đủ của các agent tới sau vài phút.")
+
+    def _zoom_pairing(self, command: str, args: str, *, from_zoom: bool) -> str:
+        """Pair, unpair or show the one Zoom account allowed to use the bot (from Telegram only)."""
+        if from_zoom:
+            return "Lệnh ghép đôi Zoom chỉ dùng được từ Telegram."
+        z = self.zoom
+        if z is None or not z.chatbot_on:
+            return "Chưa cấu hình Zoom chatbot (ZOOM_CLIENT_ID / ZOOM_CLIENT_SECRET / ZOOM_BOT_JID)."
+        if command == "/zoomstatus":
+            p = z.pairing()
+            return (f"Zoom đang ghép đôi: {p.get('name') or ''} {p['jid']}".replace("  ", " ") if p.get("jid")
+                    else "Chưa ghép đôi JID Zoom nào.")
+        if command == "/zoomxoa":
+            z.unpair()
+            return "Đã gỡ ghép đôi Zoom."
+        parts = args.split(maxsplit=1)
+        if not parts:
+            return "Cú pháp: /zoompair JID [tên]. JID có trong tin báo khi bạn nhắn bot trên Zoom lần đầu."
+        pend = z.pending()
+        same = pend.get("jid") == parts[0]
+        p = z.pair(parts[0], parts[1] if len(parts) > 1 else (pend.get("name", "") if same else ""),
+                   pend.get("account_id", "") if same else "", pend.get("reply_jid", "") if same else "")
+        return f"✅ Đã ghép đôi Zoom: {p['jid']}. Từ giờ bạn gõ lệnh và nhận thông báo trên Zoom."
 
     def _critic(self, chat_id: int, args: str) -> None:
         """One AI request about the engine's decision (runs on the chat's command lane)."""
