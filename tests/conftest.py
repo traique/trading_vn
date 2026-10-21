@@ -144,3 +144,19 @@ def _isolate_config():
     config_module._config = copy.deepcopy(default_config.DEFAULT_CONFIG)
     yield
     config_module._config = copy.deepcopy(default_config.DEFAULT_CONFIG)
+
+
+@pytest.fixture(autouse=True)
+def _fresh_llm_budget():
+    """Each test starts with an unspent AI budget kept in memory only: the
+    budget is per day, and the suite's calls must not add up across tests.
+    ``vnbot.settings.load`` sets LLM_USAGE_PATH into the environment; it is undone here."""
+    from tradingagents.llm_clients import fallback_client
+
+    saved = os.environ.pop("LLM_USAGE_PATH", None)
+    fallback_client.reset_provider_state()
+    yield
+    os.environ.pop("LLM_USAGE_PATH", None)
+    if saved is not None:
+        os.environ["LLM_USAGE_PATH"] = saved
+    fallback_client.reset_provider_state()

@@ -3,7 +3,8 @@
 Hướng dẫn chạy TradingAgents VN liên tục trên Botkeep (hoặc bất kỳ máy chủ Python nào luôn bật). Một tiến trình `main_botkeep.py` gồm:
 
 - **Trang web**: nhập mã cổ phiếu, xem hàng đợi, đọc báo cáo HTML của các agent, sửa danh sách theo dõi.
-- **Bot Telegram**: `/phantich`, `/nhanh`, `/theodoi`, `/trangthai`, `/id`.
+- **Bot Telegram**: `/phantich`, `/phanbien`, `/nhanh`, `/theodoi`, `/trangthai`, `/id`. Zoom Team Chat ngang hàng (tuỳ chọn).
+- **Cảnh báo trong phiên**: stop, mục tiêu, vùng mua, VNINDEX giảm mạnh, không gọi AI.
 - **Báo cáo tự động** cho danh sách theo dõi sau giờ đóng cửa mỗi ngày giao dịch (ngày lễ tự bỏ qua).
 - **Bot giao dịch** chạy ba chiến lược song song (Phòng thủ - mặc định, Quant Engine và Động lượng VN30), mỗi chiến lược một tài khoản ảo, kèm (tuỳ chọn) lệnh đề xuất cho tài khoản thật. **Mỗi đêm bot tự hiệu chỉnh ngưỡng** của Quant Engine và Động lượng (Phòng thủ giữ bộ đã kiểm định). Không bao giờ gửi lệnh tới CTCK.
 
@@ -87,6 +88,8 @@ Botkeep tự đặt `SERVER_PORT`; chạy nơi khác thì dùng `PORT` (mặc đ
 | `/phantich FPT` | Phân tích đầy đủ bằng các agent (vài phút) |
 | `/phantich FPT 2026-10-01` | Phân tích tại một ngày trong quá khứ (chỉ dùng dữ liệu có đến ngày đó) |
 | `/nhanh FPT` | Chỉ quyết định của Quant Engine, không gọi AI (vài giây) |
+| `/phanbien FPT [YYYY-MM-DD]` | AI phản biện quyết định của Quant Engine: **1 lượt gọi AI**, trả lời đồng ý/phản đối kèm lý do |
+| `/phanbien` | AI phản biện đúng bao nhiêu (kết quả bóng của các lần phản biện) |
 | `/theodoi FPT,HPG,VCB` | Đặt danh sách báo cáo tự động (tối đa 30 mã) |
 | `/theodoi` | Xem danh sách đang theo dõi |
 | `/trangthai` | Hàng đợi và trạng thái các nhà cung cấp AI |
@@ -114,7 +117,14 @@ Mã nhận được các dạng `FPT`, `fpt`, `FPT.VN`, `HOSE:FPT`. Chỉ số (
 Hai lịch chạy độc lập (giờ Việt Nam):
 
 1. **Bot giao dịch** (nếu `TRADE_MODE` khác `off`), mỗi ngày lúc `TRADE_TIME` (mặc định = `DAILY_REPORT_TIME` nếu sau 15:05, ngược lại 15:30; **không bao giờ trước 15:05**, khi nến ngày mới chốt): khớp các phiên chưa xử lý, ra quyết định, đặt lệnh cho phiên tới cho cả ba chiến lược, gửi báo cáo 🛡️ Phòng thủ, 🤖 Quant Engine, 🚀 Động lượng và 📊 so sánh qua Telegram. Sau đó **tự hiệu chỉnh** (nếu `AUTO_CALIBRATE=1`) trên phiên vừa xử lý, gửi kết quả ⚙️.
-2. **Phân tích đầy đủ bằng AI** cho từng mã trong watchlist, thứ Hai - thứ Sáu lúc `DAILY_REPORT_TIME` (có thể đặt buổi sáng; trước giờ đóng cửa phân tích dùng phiên đã đóng gần nhất).
+2. **Sàng lọc watchlist rồi mới gọi AI**, thứ Hai - thứ Sáu lúc `DAILY_REPORT_TIME` (có thể đặt buổi sáng; trước giờ đóng cửa phân tích dùng phiên đã đóng gần nhất). Quant Engine xét mọi mã của `SCAN_UNIVERSE` (mặc định `vn100`: rổ VN100 cộng watchlist; `vn30` hoặc `watchlist` để thu hẹp) mà không tốn lượt AI, rồi gửi một tin tóm tắt: số mã theo từng hành động, các mã được gửi AI, các mã đạt nhưng chưa gửi, và từng mã trong watchlist. Lượt quét VN100 mất vài phút vì phải tải giá, dòng tiền và tin tức của 100 mã. Ba tài khoản ảo không đổi rổ (`UNIVERSE_VN30`); chỉ `DAILY_AI_MAX` (mặc định 5) mã có hành động trong `DAILY_AI_ACTIONS` (mặc định `BUY,SELL`), xếp theo độ tin cậy của engine, mới được gửi AI, và chỉ khi hạn mức AI trong ngày còn đủ. Cách gửi theo `DAILY_AI_MODE`:
+   - `critic` (mặc định, giống bot OKX): **mỗi mã 1 lượt gọi AI**. AI được giao nhiệm vụ tìm lý do để từ chối quyết định của hệ thống và trả lời đồng ý/phản đối, độ chắc, lý do, rủi ro chính. AI không đổi hành động hay mức giá, bot giao dịch không đi theo AI.
+   - `full`: chuỗi agent đầy đủ như `/phantich` (khoảng 25 lượt gọi mỗi mã).
+   - `off`: chỉ gửi kết quả của Quant Engine.
+
+   **Kết quả bóng:** mỗi lần phản biện được lưu (`data/critic_log.json`) và chấm trên các phiên sau đó. Lệnh MUA: vào giá đóng cửa ngày quyết định, chạm stop trước (−1R), chạm mục tiêu (+R:R), hoặc hết 20 phiên. Lệnh BÁN: giá sau 10 phiên. Tin hằng ngày và `/phanbien` cho biết các lệnh AI phản đối kết thúc ra sao, tức AI chặn đúng bao nhiêu phần trăm. 5 kết quả gần nhất được đưa vào lời nhắc của lần phản biện sau, không tốn thêm lượt gọi.
+
+   Mã khác muốn AI xem thì gửi `/phanbien MÃ` (1 lượt) hoặc `/phantich MÃ` (đầy đủ).
 
 - **Ngày lễ:** bot giao dịch chỉ xử lý những phiên VNINDEX thực sự có nến, nên ngày lễ tự bỏ qua; phân tích watchlist cũng bỏ qua ngày lễ khi chạy sau 15:05.
 - **Chạy bù:** mỗi lần chạy (kể cả lúc server khởi động), bot xử lý lần lượt mọi phiên bị lỡ từ phiên cuối đã xử lý, mỗi phiên chỉ dùng dữ liệu tới phiên đó. Bù tối đa 20 phiên; phiên cũ hơn bị bỏ qua và lệnh chờ của chúng bị huỷ (báo cáo có ghi).
@@ -136,6 +146,26 @@ Hai lịch chạy độc lập (giờ Việt Nam):
 - **Đêm đầu tiên chạy lâu hơn** (khoảng 20–30 phút): bot tải lịch sử khối ngoại, tự doanh và ETF cho cả rổ, cùng khoảng 400 phiên độ rộng HOSE (mỗi phiên một lượt gọi). Dữ liệu được lưu dần, nên khởi động lại giữa chừng không mất phần đã tải.
 - **Cách tự hiệu chỉnh và các giới hạn:** xem README chính, mục "Bot giao dịch tự hiệu chỉnh". Muốn tắt: `AUTO_CALIBRATE=0`. Muốn quay về ngưỡng gốc: xoá `data/results/quant_params.json`.
 
+### Cảnh báo trong phiên (không gọi AI)
+
+Các tài khoản ảo vẫn khớp lệnh theo nến ngày sau 15:05 (đúng như kiểm định). Trong phiên, bot chỉ **báo** để bạn xem ngay thay vì đợi báo cáo buổi tối. Mỗi `INTRADAY_INTERVAL_MIN` phút (mặc định 15) trong giờ khớp lệnh liên tục (9:15–11:30, 13:00–14:30), bot đọc giá khớp gần nhất (DNSE) và gửi qua Telegram/Zoom:
+
+- ⛔ mã đang giữ có giá ≤ stop, kèm số cổ phiếu bán được theo T+2; 🎯 chạm T1; 🏁 chạm T2; 🔒 giá sàn (có thể không bán được). Áp dụng cho tài khoản thật (chế độ `signal`) và tài khoản ảo Quant Engine;
+- 🛒 lệnh mua giới hạn hôm nay của Quant Engine đang trong vùng mua, hoặc ⚠️ giá đã dưới stop dự kiến (nên bỏ lệnh);
+- 📉 VNINDEX giảm `INTRADAY_VNI_DROP_PCT` % (mặc định 2) và gấp đôi mức đó so với phiên trước.
+
+Mỗi cảnh báo gửi một lần mỗi ngày, kể cả khi khởi động lại (`data/intraday_alerts.json`). Giá đọc cách nhau vài phút nên có thể bỏ lỡ một cú xuyên stop rất ngắn. Tắt: `INTRADAY_ALERTS=0`.
+
+### Zoom Team Chat
+
+Ngang hàng Telegram, làm theo bot OKX:
+
+- **Thông báo** (báo cáo hằng ngày, AI phản biện, cảnh báo trong phiên) gửi vào Zoom theo một trong hai cách:
+  - Incoming Webhook: trong kênh Zoom gõ `/inc connect vnbot`, dán Endpoint vào `ZOOM_WEBHOOK_URL`, Token vào `ZOOM_WEBHOOK_TOKEN`.
+  - Chatbot: `ZOOM_CLIENT_ID`, `ZOOM_CLIENT_SECRET`, `ZOOM_BOT_JID`, `ZOOM_ACCOUNT_ID` và `ZOOM_TO_JID` (JID nhận tin).
+- **Dùng chung chatbot của bot OKX:** được, nhưng **chỉ để gửi thông báo**. Gửi tin chỉ cần Client ID/Secret của app, nên điền đúng các giá trị của bot OKX, thêm `ZOOM_TO_JID` = JID bot OKX đang ghép đôi (`/zoomstatus` trên Telegram của bot OKX). Tin của hai bot sẽ hiện chung một cuộc trò chuyện, cùng tên bot. Không điền `ZOOM_SECRET_TOKEN` trong trường hợp này.
+- **Gõ lệnh trong Zoom** (`nhanh FPT`, `phanbien HPG`, `danhmuc`, `lenh`, `trangthai`...): mỗi app Zoom chỉ có **một** Bot endpoint URL, nên lệnh gõ vào app của bot OKX luôn tới bot OKX. Muốn ra lệnh cho bot này thì tạo **app chatbot thứ hai** (General App → Team Chat → Chatbot), Bot endpoint URL = `<PUBLIC_URL>/webhook/zoom` (cần HTTPS), rồi điền `ZOOM_SECRET_TOKEN` và `ZOOM_ALLOWED_USERS` (JID hoặc email được phép). Người lạ nhắn bot sẽ bị từ chối và bạn được báo JID của họ qua Telegram. File báo cáo HTML chỉ gửi qua Telegram; trên Zoom bot gửi kèm link trang web.
+
 ## 7. Hàng đợi và bảo vệ quota
 
 - Mỗi lúc chạy **một** mã; yêu cầu khác xếp hàng.
@@ -151,7 +181,28 @@ Mỗi lượt gọi AI đi theo `PROVIDER_ORDER` (mặc định `router9,groq,op
 - Lỗi kết nối, timeout, lỗi máy chủ hoặc bị từ chối yêu cầu → chuyển ngay sang nhà cung cấp kế tiếp.
 - Bị 429 (hết quota) → nghỉ theo `Retry-After`, hoặc `LLM_QUOTA_COOLDOWN_SEC` (mặc định 300 s).
 - Key bị từ chối → nghỉ 1 giờ. 9Router lỗi → nghỉ `ROUTER9_RETRY_SEC` (mặc định 900 s).
-- Khi tất cả đang nghỉ, vẫn thử lần lượt thay vì báo lỗi ngay.
+- Khi tất cả đang nghỉ hoặc hết hạn mức, lượt gọi **báo lỗi ngay, không gửi gì** (trước đây vẫn thử lần lượt, chính điều này làm gateway đang quá tải bị dồn thêm). `LLM_TRY_RESTING=1` để quay lại cách cũ.
+- Không retry bên trong SDK: một lượt gọi chỉ gửi một yêu cầu tới mỗi nhà cung cấp.
+- Tối đa `LLM_MAX_CONCURRENT` (mặc định 2) yêu cầu cùng lúc.
+- Hạn mức ngày (giờ VN, giữ qua lần khởi động lại trong `data/llm_usage.json`): tổng `LLM_MAX_CALLS_PER_DAY` (mặc định 60) và riêng từng nhà cung cấp `<TÊN>_MAX_CALLS_PER_DAY` (`ROUTER9_`, `GROQ_`, `OPENROUTER_`, `XAI_`; OpenRouter mặc định 45, dưới mức 50 lượt/ngày của gói free; 0 = không giới hạn). Nhà cung cấp hết hạn mức được bỏ qua tới hôm sau; hết tổng hạn mức thì mọi lượt gọi AI báo lỗi tới hôm sau; `/phantich` bị từ chối ngay khi hạn mức còn lại dưới 25 lượt (bạn vẫn nhận quyết định của Quant Engine). `/trangthai` và trang web hiện số lượt đã dùng.
+
+- Khoảng nghỉ tối thiểu giữa hai lượt gọi tới cùng một nhà cung cấp: `<TÊN>_MIN_INTERVAL_SEC` (mặc định 0). Các lượt gọi cùng lúc xếp hàng lần lượt, không tới dồn một lúc.
+
+**9Router đứng sau một tài khoản ChatGPT free** (vd chatgpt2api giả lập Codex): một tài khoản free chỉ chịu được ít lượt mỗi giờ, trả lời chậm, và dễ bị đánh dấu khi nhận nhiều yêu cầu dồn dập. Nên đặt:
+
+```
+DAILY_AI_MODE=critic             # 1 lượt gọi mỗi mã, chỉ là chat thường (không tool, không JSON mode)
+DAILY_AI_MAX=5
+LLM_MAX_CONCURRENT=1
+ROUTER9_MIN_INTERVAL_SEC=30
+ROUTER9_MAX_CALLS_PER_DAY=40     # chỉnh theo mức tài khoản chịu được
+ROUTER9_RETRY_SEC=1800           # 9Router lỗi thì nghỉ 30 phút, chuyển sang OpenRouter
+LLM_CALL_TIMEOUT_SEC=180
+```
+
+`/phantich` (chuỗi agent) cần gọi tool và structured output, mỗi mã khoảng 25 lượt: với tài khoản free nên hạn chế, dùng `/phanbien` thay thế. Bộ giả lập nào không hỗ trợ tool calling thì lượt đó báo lỗi và chuyển sang nhà cung cấp kế tiếp.
+
+Một lượt phân tích đầy đủ tốn khoảng 15-35 lượt gọi AI (4 analyst kèm các vòng gọi tool, Bull/Bear, Research Manager, Trader, 3 góc nhìn rủi ro, Portfolio Manager). Giảm `MAX_TOOL_ROUNDS` nếu cần tiết kiệm thêm.
 
 `QUICK_MODEL` / `DEEP_MODEL` chọn model trên 9Router cho hai tầng (tầng deep dùng cho Research Manager và Portfolio Manager). Các nhà cung cấp khác dùng `GROQ_MODEL`, `OPENROUTER_MODEL`, `XAI_MODEL`.
 
@@ -168,6 +219,11 @@ Mỗi lượt gọi AI đi theo `PROVIDER_ORDER` (mặc định `router9,groq,op
 | `LLM_QUOTA_COOLDOWN_SEC` | 300 | Nghỉ khi 429 không có Retry-After |
 | `ROUTER9_RETRY_SEC` | 900 | Nghỉ khi 9Router lỗi |
 | `LLM_CALL_TIMEOUT_SEC` | 120 | Timeout mỗi lượt gọi AI |
+| `LLM_MAX_CALLS_PER_DAY` | 60 | Tổng lượt gọi AI mỗi ngày (0 = không giới hạn) |
+| `ROUTER9_MAX_CALLS_PER_DAY`, `GROQ_…`, `OPENROUTER_…`, `XAI_…` | 0, OpenRouter 45 | Hạn mức ngày từng nhà cung cấp (0 = không giới hạn) |
+| `LLM_MAX_CONCURRENT` | 2 | Số lượt gọi AI chạy cùng lúc |
+| `ROUTER9_MIN_INTERVAL_SEC`, `GROQ_…`, `OPENROUTER_…`, `XAI_…` | 0 | Số giây tối thiểu giữa hai lượt gọi tới nhà cung cấp đó |
+| `LLM_TRY_RESTING` | 0 | 1 = vẫn gọi nhà cung cấp đang nghỉ khi không còn ai khác |
 | `TELEGRAM_TOKEN` | - | Token bot (bỏ trống = tắt bot) |
 | `TELEGRAM_ALLOWED_IDS` | - | Id được dùng bot |
 | `TELEGRAM_REPORT_CHAT_IDS` | = allowed ids | Nơi nhận báo cáo hằng ngày |
@@ -176,6 +232,16 @@ Mỗi lượt gọi AI đi theo `PROVIDER_ORDER` (mặc định `router9,groq,op
 | `SERVER_PORT` / `PORT` | 8080 | Cổng web |
 | `WATCHLIST` | - | Watchlist ban đầu (chỉ dùng lần chạy đầu) |
 | `DAILY_REPORT_TIME` | `15:30` | Giờ phân tích watchlist tự động (HH:MM, giờ VN) |
+| `INTRADAY_ALERTS` | 1 | Cảnh báo trong phiên (không gọi AI) |
+| `INTRADAY_INTERVAL_MIN` | 15 | Số phút giữa hai lần kiểm tra trong phiên (tối thiểu 5) |
+| `INTRADAY_VNI_DROP_PCT` | 2 | VNINDEX giảm bao nhiêu % thì báo (báo thêm khi giảm gấp đôi) |
+| `ZOOM_WEBHOOK_URL`, `ZOOM_WEBHOOK_TOKEN` | - | Gửi thông báo vào một kênh Zoom (Incoming Webhook) |
+| `ZOOM_CLIENT_ID`, `ZOOM_CLIENT_SECRET`, `ZOOM_BOT_JID`, `ZOOM_ACCOUNT_ID`, `ZOOM_TO_JID` | - | Chatbot Zoom gửi thông báo tới `ZOOM_TO_JID` (dùng chung được app của bot OKX) |
+| `ZOOM_SECRET_TOKEN`, `ZOOM_ALLOWED_USERS` | - | Nhận lệnh gõ trong Zoom tại `/webhook/zoom` (cần app riêng) |
+| `SCAN_UNIVERSE` | `vn100` | Rổ mã lượt quét 15:30 xét, luôn cộng watchlist: `vn100`, `vn30`, `watchlist` |
+| `DAILY_AI_MODE` | `critic` | Lượt tự động gọi AI thế nào: `critic` (1 lượt/mã), `full` (chuỗi agent, ~25 lượt/mã), `off` |
+| `DAILY_AI_MAX` | 5 | Số mã watchlist được gửi AI mỗi ngày (0 = không gọi AI ở lượt tự động) |
+| `DAILY_AI_ACTIONS` | `BUY,SELL` | Hành động của Quant Engine đáng để hỏi AI |
 | `TRADE_TIME` | `DAILY_REPORT_TIME` nếu ≥ 15:05, ngược lại `15:30` | Giờ bot giao dịch + hiệu chỉnh chạy (HH:MM, giờ VN); giá trị trước 15:05 được nâng lên 15:05 |
 | `MAX_PENDING` | 10 | Số lượt chờ tối đa từ web/Telegram |
 | `TRADE_MODE` | `paper` | `paper` / `signal` / `off` |

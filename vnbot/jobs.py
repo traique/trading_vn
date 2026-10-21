@@ -27,6 +27,9 @@ from vnbot.settings import Settings, graph_config
 logger = logging.getLogger(__name__)
 
 MAX_JOBS_KEPT = 200
+# A full analysis costs this many AI requests, give or take (four analysts with
+# their tool rounds, the debate, the trader, three risk views, the manager).
+CALLS_PER_ANALYSIS = 25
 ACTIVE = ("queued", "quick", "running")
 
 
@@ -173,6 +176,13 @@ class JobQueue:
         self._persist()
         self._notify(job, "quick")
 
+        from tradingagents.llm_clients.fallback_client import budget_left
+
+        left = budget_left()
+        if left is not None and left < CALLS_PER_ANALYSIS:
+            # Refused before the first request: a half-run analysis would spend the rest for nothing.
+            raise RuntimeError(f"Hạn mức AI hôm nay còn {left} lượt, không đủ cho phân tích đầy đủ "
+                               f"(khoảng {CALLS_PER_ANALYSIS} lượt). Dùng /phanbien (1 lượt) hoặc thử lại ngày mai.")
         job.status = "running"
         self._persist()
         graph = self._graph_instance()

@@ -167,8 +167,10 @@ Quant Engine không phải ứng viên trong đợt kiểm định này. Chạy 
    - Chiến lược động lượng xếp hạng lại VN30 khi đến kỳ.
 
    Báo cáo 🛡️ / 🤖 / 🚀 / 📊 gửi qua Telegram; NAV được ghi cạnh VNINDEX.
-3. **Phân tích AI đầy đủ** cho từng mã trong watchlist.
+3. **Sàng lọc rồi mới gọi AI (giống bot OKX):** Quant Engine xét VN100 + watchlist (`SCAN_UNIVERSE`, không tốn AI); chỉ `DAILY_AI_MAX` (mặc định 5) mã BUY/SELL mạnh nhất được **AI phản biện, 1 lượt gọi mỗi mã** (đồng ý/phản đối kèm lý do; không đổi hành động hay mức giá). Bot theo dõi kết quả bóng để biết AI phản đối đúng bao nhiêu. Tất cả nằm trong hạn mức AI của ngày (`LLM_MAX_CALLS_PER_DAY`, xem [tầng AI dự phòng](deploy/botkeep/README.md#8-tầng-ai-dự-phòng)).
 4. **Tự hiệu chỉnh** Quant Engine và Động lượng, rồi gửi kết quả ⚙️. Phòng thủ không tự hiệu chỉnh.
+
+**Trong phiên** (`INTRADAY_ALERTS=1`, không gọi AI): mỗi 15 phút bot đọc giá khớp gần nhất và báo khi mã đang giữ chạm stop/T1/T2/giá sàn, lệnh mua hôm nay vào vùng mua, hoặc VNINDEX giảm từ 2%. Bot chỉ báo, các tài khoản ảo vẫn khớp theo nến ngày sau 15:05.
 
 Ngày lễ (VNINDEX không có phiên) được bỏ qua.
 
@@ -249,6 +251,7 @@ Mã nhận các dạng `FPT`, `fpt`, `FPT.VN`, `HOSE:FPT`. Chỉ số (`VNINDEX`
 |---|---|
 | `/phantich FPT [YYYY-MM-DD]` | Phân tích đầy đủ bằng các agent (vài phút): quyết định hệ thống tới trước, báo cáo + file HTML tới sau |
 | `/nhanh FPT` | Chỉ quyết định của Quant Engine (vài giây, không tốn quota AI) |
+| `/phanbien FPT` / `/phanbien` | AI phản biện quyết định của hệ thống (1 lượt gọi AI) / AI phản đối đúng bao nhiêu |
 | `/theodoi FPT,HPG,VCB` / `/theodoi` | Đặt / xem watchlist |
 | `/danhmuc` | Danh mục ba tài khoản ảo (và tài khoản thật ở chế độ `signal`) |
 | `/lenh` | Lệnh bot đặt cho phiên tới |
@@ -258,6 +261,8 @@ Mã nhận các dạng `FPT`, `fpt`, `FPT.VN`, `HOSE:FPT`. Chỉ số (`VNINDEX`
 | `/khop mua FPT 100 56300` | Báo đã khớp lệnh thật; bán: `/khop ban ...` |
 | `/trangthai` | Hàng đợi và trạng thái nhà cung cấp AI |
 | `/id` | Telegram id của bạn |
+
+**Zoom Team Chat** (tuỳ chọn, giống bot OKX): mọi thông báo gửi cả vào Zoom (Incoming Webhook hoặc chatbot; dùng chung được app chatbot của bot OKX để nhận thông báo); gõ lệnh trong Zoom cần một app chatbot riêng. Cách cài: [deploy/botkeep/README.md](deploy/botkeep/README.md#zoom-team-chat).
 
 ### Trang web
 

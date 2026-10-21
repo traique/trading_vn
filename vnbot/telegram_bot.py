@@ -100,6 +100,7 @@ HELP = (
     "/phantich FPT - phân tích đầy đủ bằng các agent AI (vài phút)\n"
     "/phantich FPT 2026-10-01 - phân tích tại một ngày trong quá khứ\n"
     "/nhanh FPT - chỉ quyết định của hệ thống định lượng (vài giây)\n"
+    "/phanbien FPT - AI phản biện quyết định của hệ thống (1 lượt gọi AI); /phanbien - AI phản biện đúng bao nhiêu\n"
     "/theodoi FPT,HPG,VCB - đặt danh sách báo cáo tự động mỗi ngày\n"
     "/theodoi - xem danh sách đang theo dõi\n"
     "/trangthai - hàng đợi và trạng thái các nhà cung cấp AI\n"
@@ -111,6 +112,10 @@ HELP = (
     "/von 500000000 - đặt tiền mặt tài khoản thật\n\n"
     "Hành động và mọi mức giá do hệ thống định lượng chốt; các agent AI chỉ diễn giải."
 )
+
+
+# The sender of a command typed in Zoom (vnbot.zoom checked it against ZOOM_ALLOWED_USERS).
+ZOOM_USER = "zoom"
 
 
 def _amount(text: str) -> float:
@@ -154,6 +159,8 @@ class TelegramBot:
         self._session = requests.Session()
         self._thread = threading.Thread(target=self._poll, name="telegram-bot", daemon=True)
         self.trader = None   # vnbot.trader.TradingBot, set by main_botkeep
+        self._critic_llm = None   # the provider chain, built on the first /phanbien
+        self.zoom = None          # vnbot.zoom.ZoomChannel: broadcasts go there too, its commands come here
         # Commands of one chat run in order on one lane; a burst waits instead of
         # spawning a thread per message (the host has 2 GB).
         self._lanes = [ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"telegram-cmd-{i}")
@@ -211,6 +218,10 @@ class TelegramBot:
         raise RuntimeError(f"Telegram {method}: still rate limited")
 
     def send(self, chat_id: int, text: str) -> None:
+        if isinstance(chat_id, str) and chat_id.startswith("zoom:"):
+            if self.zoom is not None:
+                self.zoom.reply(chat_id, redact(text))
+            return
         for part in chunks(redact(text)):
             try:
                 self._call("sendMessage", chat_id=chat_id, text=part, disable_web_page_preview="true")
@@ -218,13 +229,19 @@ class TelegramBot:
                 logger.exception("Telegram sendMessage to %s failed", chat_id)
 
     def broadcast(self, text: str) -> None:
-        """Send to the report chats (the daily bot report, the calibration result)."""
+        """Send to the report chats (the daily bot report, the calibration result) and Zoom."""
+        if self.zoom is not None:
+            self.zoom.send(redact(text))
         if not self.enabled:
             return
         for chat_id in sorted(self.settings.telegram_report_chat_ids):
             self.send(chat_id, text)
 
     def send_file(self, chat_id: int, path, caption: str = "") -> None:
+        if isinstance(chat_id, str):
+            link = f": {self.settings.public_url}" if self.settings.public_url else ""
+            self.send(chat_id, f"{caption} - file HTML chỉ gửi qua Telegram, xem trên trang web{link}")
+            return
         try:
             with open(path, "rb") as handle:
                 self._call("sendDocument", http_timeout=60, chat_id=chat_id, caption=caption[:1000],
@@ -329,6 +346,25 @@ class TelegramBot:
                 self._strangers_queued -= 1
             raise
 
+    def zoom_command(self, target: str, text: str) -> None:
+        """A command typed in Zoom by an allowed sender; runs on a lane like a Telegram one."""
+        message = {"chat": {"id": target}, "from": {"id": ZOOM_USER}, "text": text}
+        with self._queued_lock:
+            if self._queued >= MAX_QUEUED_COMMANDS:
+                full = True
+            else:
+                full = False
+                self._queued += 1
+        if full:
+            self.send(target, f"⚠️ Bot đang bận ({MAX_QUEUED_COMMANDS} lệnh chờ). Gửi lại sau ít phút.")
+            return
+        try:
+            self._lanes[hash(target) % len(self._lanes)].submit(self._run, message)
+        except Exception:
+            with self._queued_lock:
+                self._queued -= 1
+            raise
+
     def _run(self, message: dict, stranger: bool = False) -> None:
         try:
             self._handle(message)
@@ -398,10 +434,10 @@ class TelegramBot:
         command = command.split("@")[0].lower()
         args = rest.strip()
 
-        if command == "/id":
+        if command == "/id" and user_id != ZOOM_USER:
             self.send(chat_id, f"Telegram id của bạn: {user_id}")
             return
-        if user_id not in self.settings.telegram_allowed_ids:
+        if user_id != ZOOM_USER and user_id not in self.settings.telegram_allowed_ids:
             self.send(chat_id, f"Bot chưa cho phép tài khoản này. Thêm {user_id} vào TELEGRAM_ALLOWED_IDS.")
             return
         try:
@@ -409,6 +445,8 @@ class TelegramBot:
                 self.send(chat_id, self._help())
             elif command == "/phantich":
                 self._analyze(chat_id, args)
+            elif command == "/phanbien":
+                self._critic(chat_id, args)
             elif command == "/nhanh":
                 self.send(chat_id, quick_text(*(args.split()[:2] or [""])))
             elif command == "/theodoi":
@@ -439,6 +477,24 @@ class TelegramBot:
         ahead = self.jobs.position(job.id)
         wait = f" (đang có {ahead} lượt chờ trước)" if ahead else ""
         self.send(chat_id, f"⏳ Đã nhận {code} ngày {day}{wait}. Quyết định hệ thống sẽ tới trước, báo cáo đầy đủ của các agent tới sau vài phút.")
+
+    def _critic(self, chat_id: int, args: str) -> None:
+        """One AI request about the engine's decision (runs on the chat's command lane)."""
+        from tradingagents.quant import engine
+        from vnbot.critic import CriticLog, default_llm
+
+        log = CriticLog(self.settings.data_dir)
+        parts = args.split()
+        if not parts:
+            self.send(chat_id, log.stats_text())
+            return
+        code, day = check_request(parts[0], parts[1] if len(parts) > 1 else None)
+        self.send(chat_id, f"⏳ AI đang phản biện {code} ngày {day} (1 lượt gọi)...")
+        result = engine.analyze(code, day)
+        if self._critic_llm is None:
+            self._critic_llm = default_llm(self.settings)
+        log.settle_now()
+        self.send(chat_id, f"📊 {result.deterministic_summary}\n\n{log.review(day, result, self._critic_llm)}")
 
     def _trading(self, chat_id: int, command: str, args: str) -> None:
         if self.trader is None or self.settings.trade_mode == "off":
@@ -485,25 +541,26 @@ class TelegramBot:
             self.send(chat_id, "Đang theo dõi: " + (", ".join(codes) if codes else "(trống)"))
 
     def _status(self) -> str:
-        from tradingagents.llm_clients.fallback_client import provider_status
+        from tradingagents.llm_clients.fallback_client import provider_status, usage_today
 
         lines = ["Hàng đợi:"]
         for job in self.jobs.recent(8):
             lines.append(f"- {job.ticker} {job.date}: {job.status} {job.action}".rstrip())
-        lines.append("\nNhà cung cấp AI (theo thứ tự):")
+        usage = usage_today()
+        cap = f"/{usage['cap']}" if usage["cap"] else ""
+        lines.append(f"\nNhà cung cấp AI (theo thứ tự), hôm nay đã gọi {usage['total']}{cap} lượt:")
         for row in provider_status():
             state = f"nghỉ {row['resting_seconds']}s ({row['last_error']})" if row["resting_seconds"] else "sẵn sàng"
-            lines.append(f"- {row['label']} [{row['model']}]: {state}")
+            calls = f"{row['calls_today']}/{row['cap']}" if row["cap"] else str(row["calls_today"])
+            lines.append(f"- {row['label']} [{row['model']}]: {state}, {calls} lượt")
         return "\n".join(lines)
 
     # ── job events ──
     def on_job_event(self, job: Job, event: str) -> None:
-        if not self.enabled:
-            return
-        # Telegram askers, plus the report chats when the daily run asked for it;
+        # Telegram and Zoom askers, plus the report chats when the daily run asked for it;
         # a web request is followed on the web page.
-        targets = list(job.chat_ids)
-        if "daily" in job.sources:
+        targets = [c for c in job.chat_ids if self.enabled or isinstance(c, str)]
+        if "daily" in job.sources and self.enabled:
             targets += [c for c in sorted(self.settings.telegram_report_chat_ids) if c not in targets]
         for chat_id in targets:
             if event == "quick":

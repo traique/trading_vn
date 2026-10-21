@@ -9,7 +9,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from vnbot.jobs import JobQueue, prune_cache, write_text_atomic
+from vnbot.jobs import CALLS_PER_ANALYSIS, JobQueue, prune_cache, write_text_atomic
 from vnbot.settings import MIN_TRADE_TIME, Settings
 
 logger = logging.getLogger(__name__)
@@ -77,6 +77,9 @@ class Watchlist:
         return clean[:30]
 
 
+# The critic asks once; a second request when the first provider fails.
+CALLS_PER_CRITIC = 2
+
 # A weekday whose VNINDEX bar is still missing at this time (Vietnam) is a holiday;
 # before it, a missing bar is taken as late (the provider has not published it yet).
 LATE_BAR_CUTOFF = "18:00"
@@ -103,8 +106,11 @@ class DailyScheduler:
       weekday whose bar is not published yet (the run reached only the day
       before), the day is not stamped: it is tried again every
       ``LATE_BAR_RETRY_SECONDS`` until ``LATE_BAR_CUTOFF``, then taken as a holiday.
-    - weekdays at ``daily_report_time``: the watchlist's full analyses (a missing
-      bar after the close is likewise waited for until ``LATE_BAR_CUTOFF``).
+    - weekdays at ``daily_report_time``: the watchlist, screened by the
+      quantitative engine (no AI); only the best ``daily_ai_max`` codes whose
+      action is in ``daily_ai_actions`` get the full AI analysis, within the
+      day's AI budget (a missing bar after the close is likewise waited for
+      until ``LATE_BAR_CUTOFF``).
     """
 
     RETRY_SECONDS = 600            # first retry; doubles per failure up to MAX_RETRY_SECONDS
@@ -112,10 +118,16 @@ class DailyScheduler:
     MAX_TRADE_ATTEMPTS = 6
     LATE_BAR_RETRY_SECONDS = 600
 
-    def __init__(self, settings: Settings, jobs: JobQueue, watchlist: Watchlist, bot=None, notify=None):
+    def __init__(self, settings: Settings, jobs: JobQueue, watchlist: Watchlist, bot=None, notify=None,
+                 critic_llm=None):
+        from vnbot.critic import CriticLog
+
         self.settings, self.jobs, self.watchlist = settings, jobs, watchlist
         self.bot = bot
         self.notify = notify or (lambda text: None)
+        self.critic_log = CriticLog(settings.data_dir)
+        self._critic_llm = critic_llm
+        self._screened: dict = {}
         self._stamp = settings.data_dir / "last_daily_run.txt"          # the watchlist run
         self._trade_stamp = settings.data_dir / "last_trade_run.txt"    # the trading run
         self._cal_stamp = settings.data_dir / "last_calibration.txt"    # the session last calibrated
@@ -256,11 +268,113 @@ class DailyScheduler:
             write_text_atomic(self._stamp, day)
             return
         removed = prune_cache(self.settings)
-        codes = self.watchlist.get()
-        logger.info("Daily run %s: %d codes, %d stale cache files removed", day, len(codes), removed)
-        for code in codes:
-            self.jobs.submit(code, day, "daily")
+        codes = self._scan_codes()
+        picked, text = self._screen(codes, day)
+        logger.info("Daily run %s: %d codes, AI (%s) for %s, %d stale cache files removed",
+                    day, len(codes), self.settings.daily_ai_mode, ",".join(picked) or "none", removed)
+        if self.settings.daily_ai_mode == "full":
+            for code in picked:
+                self.jobs.submit(code, day, "daily")
         write_text_atomic(self._stamp, day)
+        if self.settings.daily_ai_mode == "critic" and picked:
+            text += "\n\n" + self._critique(picked, day)
+        if text:
+            self.notify(text)
+
+    def _scan_codes(self) -> list[str]:
+        """The watchlist, then the members of SCAN_UNIVERSE's index (VN30 when VN100 is unavailable)."""
+        from tradingagents.dataflows import money_flows as mf
+
+        codes = list(self.watchlist.get())
+        group = {"vn100": "VN100", "vn30": "VN30"}.get(self.settings.scan_universe)
+        if group:
+            members = mf.index_members(group)
+            if not members and group != "VN30":
+                logger.warning("Daily screen: %s members unavailable, screening VN30", group)
+                members = mf.index_members("VN30")
+            codes += [c for c in members if c not in codes]
+        return codes
+
+    @staticmethod
+    def _quick(code: str, day: str):
+        from tradingagents.quant import engine
+
+        return engine.analyze(code, day)
+
+    def critic_llm(self):
+        if self._critic_llm is None:
+            from vnbot.critic import default_llm
+
+            self._critic_llm = default_llm(self.settings)
+        return self._critic_llm
+
+    def _critique(self, picked: list[str], day: str) -> str:
+        """One AI request per picked code (the OKX way); the verdicts are kept for their shadow results."""
+        self.critic_log.settle_now()
+        lines = [f"🤖 AI phản biện ({len(picked)} mã, mỗi mã 1 lượt gọi):"]
+        for code in picked:
+            lines.append(self.critic_log.review(day, self._screened[code], self.critic_llm()))
+        lines.append("AI chỉ phản biện, không đổi hành động hay mức giá; bot giao dịch không đi theo AI.")
+        lines.append(self.critic_log.stats_text())
+        return "\n".join(lines)
+
+    def _screen(self, codes: list[str], day: str) -> tuple[list[str], str]:
+        """Which codes go to the AI, and a summary of the screen.
+
+        Like the OKX bot's scan: the engine (code, no AI) looks at every code;
+        only the strongest ones whose action calls for a decision are sent to
+        the AI, so the AI argues about a few real candidates instead of thirty.
+        """
+        from tradingagents.llm_clients.fallback_client import budget_left
+
+        mode = self.settings.daily_ai_mode
+        rows, errors = [], []
+        self._screened = {}
+        for code in codes:
+            try:
+                result = self._quick(code, day)
+            except Exception as exc:  # noqa: BLE001 - one code's data must not stop the run
+                logger.warning("Daily screen %s: %s", code, exc)
+                errors.append(code)
+                continue
+            self._screened[code] = result
+            rows.append((code, result.action, float(result.confidence or 0)))
+        wanted = [r for r in rows if r[1] in self.settings.daily_ai_actions]
+        wanted.sort(key=lambda r: r[2], reverse=True)
+        limit = self.settings.daily_ai_max if mode != "off" else 0
+        left = budget_left()
+        if left is not None:
+            limit = min(limit, left // (CALLS_PER_CRITIC if mode == "critic" else CALLS_PER_ANALYSIS))
+        picked = [r[0] for r in wanted[:limit]]
+        if not rows and not errors:
+            return picked, ""
+        scope = {"vn100": "VN100 + watchlist", "vn30": "VN30 + watchlist"}.get(self.settings.scan_universe, "watchlist")
+        counts: dict[str, int] = {}
+        for _, action, _ in rows:
+            counts[action] = counts.get(action, 0) + 1
+        lines = [f"📋 Quét {scope} {day}: Quant Engine đã xét {len(rows)} mã (không tốn lượt AI).",
+                 "Kết quả: " + " · ".join(f"{a} {n}" for a, n in sorted(counts.items(), key=lambda x: -x[1]))]
+        if picked and mode == "full":
+            lines.append("AI phân tích đầy đủ: " + ", ".join(picked) + " (báo cáo gửi sau).")
+        held_back = [r[0] for r in wanted[limit:]]
+        if held_back:
+            if mode == "off":
+                why = "DAILY_AI_MODE=off"
+            elif limit < self.settings.daily_ai_max:
+                why = "hạn mức AI hôm nay sắp hết"
+            else:
+                why = f"chỉ lấy {self.settings.daily_ai_max} mã mạnh nhất (DAILY_AI_MAX)"
+            lines.append(f"Đạt nhưng chưa gọi AI ({why}): " + ", ".join(held_back))
+        watched = set(self.watchlist.get())
+        shown = [r for r in rows if r[0] in watched and r[0] not in picked and r[0] not in held_back]
+        if shown:
+            lines.append("Watchlist:")
+        for code, action, confidence in shown:
+            lines.append(f"• {code}: {action} ({confidence * 100:.0f}%)")
+        if errors:
+            lines.append("Lỗi dữ liệu: " + ", ".join(errors))
+        lines.append("AI phản biện một mã (1 lượt gọi): /phanbien MÃ · phân tích đầy đủ (~25 lượt): /phantich MÃ")
+        return picked, "\n".join(lines)
 
     def tick(self) -> None:
         from tradingagents.market import vn_rules
