@@ -114,6 +114,10 @@ HELP = (
 )
 
 
+# The sender of a command typed in Zoom (vnbot.zoom checked it against ZOOM_ALLOWED_USERS).
+ZOOM_USER = "zoom"
+
+
 def _amount(text: str) -> float:
     """A number typed the Vietnamese way: 56.300 or 56300 (dots and commas as thousands).
 
@@ -156,6 +160,7 @@ class TelegramBot:
         self._thread = threading.Thread(target=self._poll, name="telegram-bot", daemon=True)
         self.trader = None   # vnbot.trader.TradingBot, set by main_botkeep
         self._critic_llm = None   # the provider chain, built on the first /phanbien
+        self.zoom = None          # vnbot.zoom.ZoomChannel: broadcasts go there too, its commands come here
         # Commands of one chat run in order on one lane; a burst waits instead of
         # spawning a thread per message (the host has 2 GB).
         self._lanes = [ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"telegram-cmd-{i}")
@@ -213,6 +218,10 @@ class TelegramBot:
         raise RuntimeError(f"Telegram {method}: still rate limited")
 
     def send(self, chat_id: int, text: str) -> None:
+        if isinstance(chat_id, str) and chat_id.startswith("zoom:"):
+            if self.zoom is not None:
+                self.zoom.reply(chat_id, redact(text))
+            return
         for part in chunks(redact(text)):
             try:
                 self._call("sendMessage", chat_id=chat_id, text=part, disable_web_page_preview="true")
@@ -220,13 +229,19 @@ class TelegramBot:
                 logger.exception("Telegram sendMessage to %s failed", chat_id)
 
     def broadcast(self, text: str) -> None:
-        """Send to the report chats (the daily bot report, the calibration result)."""
+        """Send to the report chats (the daily bot report, the calibration result) and Zoom."""
+        if self.zoom is not None:
+            self.zoom.send(redact(text))
         if not self.enabled:
             return
         for chat_id in sorted(self.settings.telegram_report_chat_ids):
             self.send(chat_id, text)
 
     def send_file(self, chat_id: int, path, caption: str = "") -> None:
+        if isinstance(chat_id, str):
+            link = f": {self.settings.public_url}" if self.settings.public_url else ""
+            self.send(chat_id, f"{caption} - file HTML chỉ gửi qua Telegram, xem trên trang web{link}")
+            return
         try:
             with open(path, "rb") as handle:
                 self._call("sendDocument", http_timeout=60, chat_id=chat_id, caption=caption[:1000],
@@ -331,6 +346,25 @@ class TelegramBot:
                 self._strangers_queued -= 1
             raise
 
+    def zoom_command(self, target: str, text: str) -> None:
+        """A command typed in Zoom by an allowed sender; runs on a lane like a Telegram one."""
+        message = {"chat": {"id": target}, "from": {"id": ZOOM_USER}, "text": text}
+        with self._queued_lock:
+            if self._queued >= MAX_QUEUED_COMMANDS:
+                full = True
+            else:
+                full = False
+                self._queued += 1
+        if full:
+            self.send(target, f"⚠️ Bot đang bận ({MAX_QUEUED_COMMANDS} lệnh chờ). Gửi lại sau ít phút.")
+            return
+        try:
+            self._lanes[hash(target) % len(self._lanes)].submit(self._run, message)
+        except Exception:
+            with self._queued_lock:
+                self._queued -= 1
+            raise
+
     def _run(self, message: dict, stranger: bool = False) -> None:
         try:
             self._handle(message)
@@ -400,10 +434,10 @@ class TelegramBot:
         command = command.split("@")[0].lower()
         args = rest.strip()
 
-        if command == "/id":
+        if command == "/id" and user_id != ZOOM_USER:
             self.send(chat_id, f"Telegram id của bạn: {user_id}")
             return
-        if user_id not in self.settings.telegram_allowed_ids:
+        if user_id != ZOOM_USER and user_id not in self.settings.telegram_allowed_ids:
             self.send(chat_id, f"Bot chưa cho phép tài khoản này. Thêm {user_id} vào TELEGRAM_ALLOWED_IDS.")
             return
         try:
@@ -523,12 +557,10 @@ class TelegramBot:
 
     # ── job events ──
     def on_job_event(self, job: Job, event: str) -> None:
-        if not self.enabled:
-            return
-        # Telegram askers, plus the report chats when the daily run asked for it;
+        # Telegram and Zoom askers, plus the report chats when the daily run asked for it;
         # a web request is followed on the web page.
-        targets = list(job.chat_ids)
-        if "daily" in job.sources:
+        targets = [c for c in job.chat_ids if self.enabled or isinstance(c, str)]
+        if "daily" in job.sources and self.enabled:
             targets += [c for c in sorted(self.settings.telegram_report_chat_ids) if c not in targets]
         for chat_id in targets:
             if event == "quick":

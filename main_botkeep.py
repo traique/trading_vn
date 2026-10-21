@@ -20,11 +20,13 @@ SETTINGS = settings_module.load()   # before tradingagents: fixes its data paths
 
 import uvicorn  # noqa: E402
 
+from vnbot.intraday import IntradayMonitor  # noqa: E402
 from vnbot.jobs import JobQueue, prune_cache  # noqa: E402
 from vnbot.service import DailyScheduler, Watchlist  # noqa: E402
 from vnbot.telegram_bot import TelegramBot  # noqa: E402
 from vnbot.trader import TradingBot  # noqa: E402
 from vnbot.web import create_app  # noqa: E402
+from vnbot.zoom import ZoomChannel  # noqa: E402
 
 VN_TZ = ZoneInfo("Asia/Ho_Chi_Minh")
 
@@ -61,16 +63,26 @@ def main() -> None:
     jobs = JobQueue(SETTINGS)
     watchlist = Watchlist(SETTINGS)
     bot = TelegramBot(SETTINGS, jobs, watchlist)
+    zoom = ZoomChannel()
+    if zoom.enabled:
+        bot.zoom = zoom
+        zoom.handler = bot.zoom_command
+        zoom.alert_owner = bot.broadcast
+    logging.info("Zoom: notifications %s, commands %s", "on" if zoom.notify_on else "off",
+                 "on (/webhook/zoom)" if zoom.commands_on else "off")
     trader = TradingBot(SETTINGS, watchlist, notify=bot.broadcast)
     bot.trader = trader
     jobs.start()
     bot.start()
     DailyScheduler(SETTINGS, jobs, watchlist, bot=trader, notify=bot.broadcast).start()
+    if SETTINGS.intraday_alerts and SETTINGS.trade_mode != "off":
+        IntradayMonitor(SETTINGS, trader, bot.broadcast).start()
+        logging.info("Intraday alerts: every %d min during the session (no AI)", SETTINGS.intraday_interval_min)
     logging.info("Trading bot: mode %s, calibration %s, runs daily at %s (Vietnam time); watchlist report at %s",
                  SETTINGS.trade_mode, "on" if SETTINGS.calibrate else "off", SETTINGS.trade_time,
                  SETTINGS.daily_report_time)
 
-    app = create_app(SETTINGS, jobs, watchlist, trader=trader)
+    app = create_app(SETTINGS, jobs, watchlist, trader=trader, zoom=zoom)
     uvicorn.run(app, host="0.0.0.0", port=SETTINGS.port, log_level="warning", access_log=False)
 
 

@@ -3,7 +3,8 @@
 Hướng dẫn chạy TradingAgents VN liên tục trên Botkeep (hoặc bất kỳ máy chủ Python nào luôn bật). Một tiến trình `main_botkeep.py` gồm:
 
 - **Trang web**: nhập mã cổ phiếu, xem hàng đợi, đọc báo cáo HTML của các agent, sửa danh sách theo dõi.
-- **Bot Telegram**: `/phantich`, `/phanbien`, `/nhanh`, `/theodoi`, `/trangthai`, `/id`.
+- **Bot Telegram**: `/phantich`, `/phanbien`, `/nhanh`, `/theodoi`, `/trangthai`, `/id`. Zoom Team Chat ngang hàng (tuỳ chọn).
+- **Cảnh báo trong phiên**: stop, mục tiêu, vùng mua, VNINDEX giảm mạnh, không gọi AI.
 - **Báo cáo tự động** cho danh sách theo dõi sau giờ đóng cửa mỗi ngày giao dịch (ngày lễ tự bỏ qua).
 - **Bot giao dịch** chạy ba chiến lược song song (Phòng thủ - mặc định, Quant Engine và Động lượng VN30), mỗi chiến lược một tài khoản ảo, kèm (tuỳ chọn) lệnh đề xuất cho tài khoản thật. **Mỗi đêm bot tự hiệu chỉnh ngưỡng** của Quant Engine và Động lượng (Phòng thủ giữ bộ đã kiểm định). Không bao giờ gửi lệnh tới CTCK.
 
@@ -145,6 +146,26 @@ Hai lịch chạy độc lập (giờ Việt Nam):
 - **Đêm đầu tiên chạy lâu hơn** (khoảng 20–30 phút): bot tải lịch sử khối ngoại, tự doanh và ETF cho cả rổ, cùng khoảng 400 phiên độ rộng HOSE (mỗi phiên một lượt gọi). Dữ liệu được lưu dần, nên khởi động lại giữa chừng không mất phần đã tải.
 - **Cách tự hiệu chỉnh và các giới hạn:** xem README chính, mục "Bot giao dịch tự hiệu chỉnh". Muốn tắt: `AUTO_CALIBRATE=0`. Muốn quay về ngưỡng gốc: xoá `data/results/quant_params.json`.
 
+### Cảnh báo trong phiên (không gọi AI)
+
+Các tài khoản ảo vẫn khớp lệnh theo nến ngày sau 15:05 (đúng như kiểm định). Trong phiên, bot chỉ **báo** để bạn xem ngay thay vì đợi báo cáo buổi tối. Mỗi `INTRADAY_INTERVAL_MIN` phút (mặc định 15) trong giờ khớp lệnh liên tục (9:15–11:30, 13:00–14:30), bot đọc giá khớp gần nhất (DNSE) và gửi qua Telegram/Zoom:
+
+- ⛔ mã đang giữ có giá ≤ stop, kèm số cổ phiếu bán được theo T+2; 🎯 chạm T1; 🏁 chạm T2; 🔒 giá sàn (có thể không bán được). Áp dụng cho tài khoản thật (chế độ `signal`) và tài khoản ảo Quant Engine;
+- 🛒 lệnh mua giới hạn hôm nay của Quant Engine đang trong vùng mua, hoặc ⚠️ giá đã dưới stop dự kiến (nên bỏ lệnh);
+- 📉 VNINDEX giảm `INTRADAY_VNI_DROP_PCT` % (mặc định 2) và gấp đôi mức đó so với phiên trước.
+
+Mỗi cảnh báo gửi một lần mỗi ngày, kể cả khi khởi động lại (`data/intraday_alerts.json`). Giá đọc cách nhau vài phút nên có thể bỏ lỡ một cú xuyên stop rất ngắn. Tắt: `INTRADAY_ALERTS=0`.
+
+### Zoom Team Chat
+
+Ngang hàng Telegram, làm theo bot OKX:
+
+- **Thông báo** (báo cáo hằng ngày, AI phản biện, cảnh báo trong phiên) gửi vào Zoom theo một trong hai cách:
+  - Incoming Webhook: trong kênh Zoom gõ `/inc connect vnbot`, dán Endpoint vào `ZOOM_WEBHOOK_URL`, Token vào `ZOOM_WEBHOOK_TOKEN`.
+  - Chatbot: `ZOOM_CLIENT_ID`, `ZOOM_CLIENT_SECRET`, `ZOOM_BOT_JID`, `ZOOM_ACCOUNT_ID` và `ZOOM_TO_JID` (JID nhận tin).
+- **Dùng chung chatbot của bot OKX:** được, nhưng **chỉ để gửi thông báo**. Gửi tin chỉ cần Client ID/Secret của app, nên điền đúng các giá trị của bot OKX, thêm `ZOOM_TO_JID` = JID bot OKX đang ghép đôi (`/zoomstatus` trên Telegram của bot OKX). Tin của hai bot sẽ hiện chung một cuộc trò chuyện, cùng tên bot. Không điền `ZOOM_SECRET_TOKEN` trong trường hợp này.
+- **Gõ lệnh trong Zoom** (`nhanh FPT`, `phanbien HPG`, `danhmuc`, `lenh`, `trangthai`...): mỗi app Zoom chỉ có **một** Bot endpoint URL, nên lệnh gõ vào app của bot OKX luôn tới bot OKX. Muốn ra lệnh cho bot này thì tạo **app chatbot thứ hai** (General App → Team Chat → Chatbot), Bot endpoint URL = `<PUBLIC_URL>/webhook/zoom` (cần HTTPS), rồi điền `ZOOM_SECRET_TOKEN` và `ZOOM_ALLOWED_USERS` (JID hoặc email được phép). Người lạ nhắn bot sẽ bị từ chối và bạn được báo JID của họ qua Telegram. File báo cáo HTML chỉ gửi qua Telegram; trên Zoom bot gửi kèm link trang web.
+
 ## 7. Hàng đợi và bảo vệ quota
 
 - Mỗi lúc chạy **một** mã; yêu cầu khác xếp hàng.
@@ -211,6 +232,12 @@ Một lượt phân tích đầy đủ tốn khoảng 15-35 lượt gọi AI (4 
 | `SERVER_PORT` / `PORT` | 8080 | Cổng web |
 | `WATCHLIST` | - | Watchlist ban đầu (chỉ dùng lần chạy đầu) |
 | `DAILY_REPORT_TIME` | `15:30` | Giờ phân tích watchlist tự động (HH:MM, giờ VN) |
+| `INTRADAY_ALERTS` | 1 | Cảnh báo trong phiên (không gọi AI) |
+| `INTRADAY_INTERVAL_MIN` | 15 | Số phút giữa hai lần kiểm tra trong phiên (tối thiểu 5) |
+| `INTRADAY_VNI_DROP_PCT` | 2 | VNINDEX giảm bao nhiêu % thì báo (báo thêm khi giảm gấp đôi) |
+| `ZOOM_WEBHOOK_URL`, `ZOOM_WEBHOOK_TOKEN` | - | Gửi thông báo vào một kênh Zoom (Incoming Webhook) |
+| `ZOOM_CLIENT_ID`, `ZOOM_CLIENT_SECRET`, `ZOOM_BOT_JID`, `ZOOM_ACCOUNT_ID`, `ZOOM_TO_JID` | - | Chatbot Zoom gửi thông báo tới `ZOOM_TO_JID` (dùng chung được app của bot OKX) |
+| `ZOOM_SECRET_TOKEN`, `ZOOM_ALLOWED_USERS` | - | Nhận lệnh gõ trong Zoom tại `/webhook/zoom` (cần app riêng) |
 | `SCAN_UNIVERSE` | `vn100` | Rổ mã lượt quét 15:30 xét, luôn cộng watchlist: `vn100`, `vn30`, `watchlist` |
 | `DAILY_AI_MODE` | `critic` | Lượt tự động gọi AI thế nào: `critic` (1 lượt/mã), `full` (chuỗi agent, ~25 lượt/mã), `off` |
 | `DAILY_AI_MAX` | 5 | Số mã watchlist được gửi AI mỗi ngày (0 = không gọi AI ở lượt tự động) |

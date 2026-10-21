@@ -11,6 +11,7 @@ out for a few minutes.
 from __future__ import annotations
 
 import html
+import json
 import logging
 import secrets
 import threading
@@ -295,7 +296,7 @@ def _bot_page(trader, msg: str = "") -> str:
     return "".join(parts)
 
 
-def create_app(settings: Settings, jobs: JobQueue, watchlist: Watchlist, trader=None) -> FastAPI:
+def create_app(settings: Settings, jobs: JobQueue, watchlist: Watchlist, trader=None, zoom=None) -> FastAPI:
     app = FastAPI(title="TradingAgents VN", docs_url=None, redoc_url=None, openapi_url=None)
 
     @app.middleware("http")
@@ -350,6 +351,25 @@ def create_app(settings: Settings, jobs: JobQueue, watchlist: Watchlist, trader=
     @app.get("/health")
     def health() -> JSONResponse:
         return JSONResponse({"ok": True, "time": time.time()})
+
+    async def zoom_webhook(request: Request) -> JSONResponse:
+        """Zoom chatbot events: commands typed in Zoom. Signed by Zoom (HMAC), no password."""
+        if zoom is None or not zoom.commands_on:
+            return JSONResponse({"error": "zoom commands are off"}, status_code=404)
+        raw = await request.body()
+        if not zoom.verify(raw, request.headers):
+            logger.warning("Zoom webhook: bad or missing signature from %s", _client(request))
+            return JSONResponse({"error": "invalid signature"}, status_code=401)
+        try:
+            data = json.loads(raw or b"{}")
+        except ValueError:
+            return JSONResponse({"error": "bad json"}, status_code=400)
+        if data.get("event") == "endpoint.url_validation":
+            return JSONResponse(zoom.url_validation(str((data.get("payload") or {}).get("plainToken", ""))))
+        zoom.handle(data)
+        return JSONResponse({"ok": True})
+
+    app.add_api_route("/webhook/zoom", zoom_webhook, methods=["POST"])
 
     @app.get("/", dependencies=[Depends(guard)])
     def index(error: str = "") -> HTMLResponse:

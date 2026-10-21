@@ -32,6 +32,13 @@ def _int(name: str, default: int) -> int:
         return default
 
 
+def _float(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name) or default)
+    except ValueError:
+        return default
+
+
 def _hhmm(name: str, default: str) -> str:
     """HH:MM with two-digit hours ("9:00" -> "09:00"), so times compare as text."""
     raw = (os.environ.get(name) or "").strip()
@@ -110,6 +117,9 @@ class Settings:
     calibrate: bool = True          # nightly self-calibration of the thresholds
     signal_strategy: str = "factor"     # which paper strategy the real signals follow
     trade_time: str = DEFAULT_TRADE_TIME  # HH:MM, Vietnam time, >= MIN_TRADE_TIME: bot + calibration
+    intraday_alerts: bool = True    # alerts during the session (no AI): stops, targets, buy zones, VNINDEX
+    intraday_interval_min: int = 15
+    intraday_vni_drop_pct: float = 2.0
     scan_universe: str = "vn100"    # the daily screen: vn100 | vn30 | watchlist (always plus the watchlist)
     daily_ai_mode: str = "critic"   # critic (1 AI request a code) | full (the agents, ~25) | off
     daily_ai_max: int = 5           # watchlist codes sent to the AI each day (0 = none)
@@ -155,6 +165,9 @@ def load() -> Settings:
         calibrate=_flag("AUTO_CALIBRATE", True),
         signal_strategy=_choice("SIGNAL_STRATEGY", ("factor", "momentum", "engine"), "factor"),
         trade_time=_trade_time(report_time),
+        intraday_alerts=_flag("INTRADAY_ALERTS", True),
+        intraday_interval_min=max(5, _int("INTRADAY_INTERVAL_MIN", 15)),
+        intraday_vni_drop_pct=_float("INTRADAY_VNI_DROP_PCT", 2.0),
         scan_universe=_choice("SCAN_UNIVERSE", ("vn100", "vn30", "watchlist"), "vn100"),
         daily_ai_mode=_choice("DAILY_AI_MODE", ("critic", "full", "off"), "critic"),
         daily_ai_max=max(0, _int("DAILY_AI_MAX", 5)),
